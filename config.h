@@ -25,7 +25,7 @@ static const BarItem BAR_ITEMS[] = {
   {"focused=$(hyprctl activeworkspace 2>/dev/null | grep -o '[0-9]\\+' | head -1); hyprctl workspaces 2>/dev/null | awk -v f=\"$focused\" 'BEGIN {empty=\"󱓼 \"; has_windows=\"󱨈 \"; active=\"󱓻 \"} /^workspace ID/ {ws=$3} /^[[:space:]]*windows:/ {if($2>0 && ws) arr[ws]=1} END {for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) printf \"%s\", has_windows; else printf \"%s\", empty}}'", 500 },
   { "hyprctl activewindow 2>/dev/null | grep 'title:' | sed 's/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'", 500 },
   { "<separator>", 0 },
-  { "status", 1000 }
+  { "status", 500 }
 };
 
 #define BAR_ITEMS_COUNT (sizeof(BAR_ITEMS) / sizeof(BAR_ITEMS[0]))

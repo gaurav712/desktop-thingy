@@ -6,12 +6,23 @@
 #include <unistd.h>
 #include "config.h"
 
+// Structure to hold update data for main thread
+typedef struct {
+  GtkWidget *widget;
+  gchar *new_output;
+} UpdateData;
+
 // Structure to hold item widget and update info
 typedef struct {
   GtkWidget *widget;
   const char *command;
   int interval;
-  guint timeout_id;
+  GThread *thread;           // Worker thread for this module
+  gboolean should_stop;      // Flag to stop the thread
+  gboolean thread_running;   // Flag to track if thread is active
+  GMutex mutex;              // Mutex for thread-safe access
+  GCond cond;                // Condition variable for interruptible sleep
+  gchar *previous_output;     // Previous output for change detection
 } BarItemData;
 
 static gchar *background_image_path = NULL;
@@ -49,38 +60,194 @@ execute_command (const char *command)
   return output;
 }
 
-// Update label with command output
+// Idle callback to update UI from main thread (called when worker thread signals)
 static gboolean
-update_item (gpointer user_data)
+update_ui_from_main_thread (gpointer user_data)
+{
+  UpdateData *update_data = (UpdateData *) user_data;
+  
+  if (update_data->widget != NULL && update_data->new_output != NULL)
+    {
+      gtk_label_set_text (GTK_LABEL (update_data->widget), update_data->new_output);
+    }
+  
+  // Free the update data
+  g_free (update_data->new_output);
+  g_free (update_data);
+  
+  return G_SOURCE_REMOVE;  // Remove the idle source after execution
+}
+
+// Worker thread function: polls at module interval and signals main thread on change
+static gpointer
+module_worker_thread (gpointer user_data)
 {
   BarItemData *item_data = (BarItemData *) user_data;
   
-  if (item_data->command == NULL || strcmp (item_data->command, "<separator>") == 0)
-    return G_SOURCE_CONTINUE;
+  // Mark thread as running
+  g_mutex_lock (&item_data->mutex);
+  item_data->thread_running = TRUE;
+  g_mutex_unlock (&item_data->mutex);
   
+  // Initial update
   gchar *output = execute_command (item_data->command);
   if (output != NULL)
     {
-      gtk_label_set_text (GTK_LABEL (item_data->widget), output);
+      g_mutex_lock (&item_data->mutex);
+      item_data->previous_output = g_strdup (output);
+      g_mutex_unlock (&item_data->mutex);
+      
+      // Signal main thread to update UI
+      // Read widget pointer with mutex protection (though it's set during init and never modified)
+      g_mutex_lock (&item_data->mutex);
+      GtkWidget *widget = item_data->widget;
+      g_mutex_unlock (&item_data->mutex);
+      
+      UpdateData *update_data = g_malloc (sizeof (UpdateData));
+      update_data->widget = widget;
+      update_data->new_output = g_strdup (output);
+      g_idle_add (update_ui_from_main_thread, update_data);
+      
       g_free (output);
     }
   
-  return G_SOURCE_CONTINUE;
+  // Poll at module's interval
+  while (TRUE)
+    {
+      g_mutex_lock (&item_data->mutex);
+      
+      // Wait for interval or stop signal (interruptible sleep)
+      gint64 end_time = g_get_monotonic_time () + (item_data->interval * 1000);  // microseconds
+      
+      // Wait with timeout - will wake up on cond signal or timeout
+      while (!item_data->should_stop)
+        {
+          if (!g_cond_wait_until (&item_data->cond, &item_data->mutex, end_time))
+            {
+              // Timeout occurred - break to execute command
+              break;
+            }
+          // If woken by signal and should_stop is true, break
+          if (item_data->should_stop)
+            break;
+        }
+      
+      if (item_data->should_stop)
+        {
+          g_mutex_unlock (&item_data->mutex);
+          break;
+        }
+      g_mutex_unlock (&item_data->mutex);
+      
+      // Execute command to get new output
+      output = execute_command (item_data->command);
+      
+      if (output != NULL)
+        {
+          g_mutex_lock (&item_data->mutex);
+          
+          // Compare with previous output - only signal if changed
+          if (item_data->previous_output == NULL || 
+              strcmp (item_data->previous_output, output) != 0)
+            {
+              // Data changed - signal main thread to update UI
+              // Read widget pointer while holding mutex
+              GtkWidget *widget = item_data->widget;
+              
+              UpdateData *update_data = g_malloc (sizeof (UpdateData));
+              update_data->widget = widget;
+              update_data->new_output = g_strdup (output);
+              
+              // Update stored previous output
+              g_free (item_data->previous_output);
+              item_data->previous_output = g_strdup (output);
+              
+              g_mutex_unlock (&item_data->mutex);
+              
+              // Queue update to main thread
+              g_idle_add (update_ui_from_main_thread, update_data);
+            }
+          else
+            {
+              g_mutex_unlock (&item_data->mutex);
+            }
+          
+          g_free (output);
+        }
+    }
+  
+  // Mark thread as no longer running
+  g_mutex_lock (&item_data->mutex);
+  item_data->thread_running = FALSE;
+  g_cond_signal (&item_data->cond);  // Signal in case cleanup is waiting
+  g_mutex_unlock (&item_data->mutex);
+  
+  return NULL;
 }
 
 // Cleanup function to free allocated resources
 static void
 cleanup_resources (void)
 {
-  // Remove all timeout sources
+  // Stop all worker threads and free resources
   if (bar_items_data != NULL)
     {
       for (int i = 0; i < BAR_ITEMS_COUNT; i++)
         {
-          if (bar_items_data[i].timeout_id != 0)
+          BarItemData *item_data = &bar_items_data[i];
+          
+          // Signal thread to stop
+          // Read thread pointer with mutex protection to avoid race condition
+          g_mutex_lock (&item_data->mutex);
+          GThread *thread = item_data->thread;
+          if (thread != NULL)
             {
-              g_source_remove (bar_items_data[i].timeout_id);
-              bar_items_data[i].timeout_id = 0;
+              item_data->should_stop = TRUE;
+              // Wake up thread if it's sleeping
+              g_cond_signal (&item_data->cond);
+              // Clear thread reference while holding mutex
+              item_data->thread = NULL;
+            }
+          g_mutex_unlock (&item_data->mutex);
+          
+          if (thread != NULL)
+            {
+              // Wait for thread to finish with timeout (5 seconds)
+              
+              // Try to join with a reasonable timeout
+              // Note: g_thread_join doesn't have timeout, so we use a workaround
+              // by checking thread_running flag
+              gint timeout = 50;  // 50 * 100ms = 5 seconds
+              while (timeout > 0)
+                {
+                  g_mutex_lock (&item_data->mutex);
+                  gboolean running = item_data->thread_running;
+                  g_mutex_unlock (&item_data->mutex);
+                  
+                  if (!running)
+                    break;
+                  
+                  g_usleep (100000);  // 100ms
+                  timeout--;
+                }
+              
+              // Join the thread (should be quick now)
+              g_thread_join (thread);
+            }
+          
+          // Clean up mutex and condition variable
+          // Only clear if thread was actually created (mutex/cond were initialized)
+          if (item_data->command != NULL && strcmp (item_data->command, "<separator>") != 0)
+            {
+              g_cond_clear (&item_data->cond);
+              g_mutex_clear (&item_data->mutex);
+              
+              // Free stored previous output
+              if (item_data->previous_output != NULL)
+                {
+                  g_free (item_data->previous_output);
+                  item_data->previous_output = NULL;
+                }
             }
         }
       g_free (bar_items_data);
@@ -211,17 +378,43 @@ create_menu_bar (GtkApplication *app)
           item_data->widget = label;
           gtk_box_append (GTK_BOX (bar_box), label);
           
-          // Execute command immediately
-          update_item (item_data);
+          // Initialize thread-related fields
+          item_data->should_stop = FALSE;
+          item_data->thread_running = FALSE;
+          item_data->previous_output = NULL;
+          item_data->thread = NULL;
+          g_mutex_init (&item_data->mutex);
+          g_cond_init (&item_data->cond);
           
-          // Set up periodic updates if interval > 0
-          if (item->interval > 0)
+          // Spawn worker thread for this module if interval > 0
+          // Ensure thread is only created once
+          if (item->interval > 0 && item_data->thread == NULL)
             {
-              item_data->timeout_id = g_timeout_add (
-                item->interval,
-                update_item,
-                item_data
+              GError *error = NULL;
+              item_data->thread = g_thread_try_new (
+                "module-worker",
+                module_worker_thread,
+                item_data,
+                &error
               );
+              
+              if (item_data->thread == NULL)
+                {
+                  g_printerr ("Failed to create thread for module %d: %s\n", i, 
+                             error ? error->message : "Unknown error");
+                  if (error)
+                    g_error_free (error);
+                }
+            }
+          else
+            {
+              // No interval - execute once immediately
+              gchar *output = execute_command (item_data->command);
+              if (output != NULL)
+                {
+                  gtk_label_set_text (GTK_LABEL (label), output);
+                  g_free (output);
+                }
             }
         }
     }
@@ -308,9 +501,13 @@ main (int argc, char **argv)
   
   GtkApplication *app = gtk_application_new ("org.example.layer-shell", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);
+  
+  // Connect shutdown signal to ensure cleanup on application termination
+  g_signal_connect (app, "shutdown", G_CALLBACK (cleanup_resources), NULL);
+  
   int status = g_application_run (G_APPLICATION (app), argc, argv);
   
-  // Cleanup allocated resources
+  // Cleanup allocated resources (in case shutdown signal didn't fire)
   cleanup_resources ();
   g_free (background_image_path);
   g_object_unref (app);
