@@ -2,9 +2,78 @@
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 #include <glib.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include "config.h"
 
+// Structure to hold item widget and update info
+typedef struct {
+  GtkWidget *widget;
+  const char *command;
+  int interval;
+  guint timeout_id;
+} BarItemData;
+
+// Define the items array
+const BarItem BAR_ITEMS[BAR_ITEMS_COUNT] = {
+  { "<separator>", 0 },
+  { "status", 1 }
+};
+
 static gchar *background_image_path = NULL;
+static BarItemData *bar_items_data = NULL;
+
+// Execute command and return output
+static gchar *
+execute_command (const char *command)
+{
+  FILE *fp = popen (command, "r");
+  if (fp == NULL)
+    return NULL;
+  
+  gchar *output = NULL;
+  gsize len = 0;
+  gchar buffer[1024];
+  
+  while (fgets (buffer, sizeof (buffer), fp) != NULL)
+    {
+      gsize buffer_len = strlen (buffer);
+      output = g_realloc (output, len + buffer_len + 1);
+      memcpy (output + len, buffer, buffer_len);
+      len += buffer_len;
+      output[len] = '\0';
+    }
+  
+  pclose (fp);
+  
+  // Remove trailing newline if present
+  if (output != NULL && len > 0 && output[len - 1] == '\n')
+    {
+      output[len - 1] = '\0';
+    }
+  
+  return output;
+}
+
+// Update label with command output
+static gboolean
+update_item (gpointer user_data)
+{
+  BarItemData *item_data = (BarItemData *) user_data;
+  
+  if (item_data->command == NULL || strcmp (item_data->command, "<separator>") == 0)
+    return G_SOURCE_CONTINUE;
+  
+  gchar *output = execute_command (item_data->command);
+  if (output != NULL)
+    {
+      gtk_label_set_text (GTK_LABEL (item_data->widget), output);
+      g_free (output);
+    }
+  
+  return G_SOURCE_CONTINUE;
+}
 
 static void
 create_menu_bar (GtkApplication *app)
@@ -101,14 +170,48 @@ create_menu_bar (GtkApplication *app)
   g_free (css);
   g_object_unref (css_provider);
   
-  // Add content to bar
-  GtkWidget *label = gtk_label_new ("Menu Bar");
-  gtk_box_append (GTK_BOX (bar_box), label);
+  // Allocate memory for item data
+  bar_items_data = g_malloc0 (sizeof (BarItemData) * BAR_ITEMS_COUNT);
   
-  gtk_box_append (GTK_BOX (bar_box), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
-  
-  GtkWidget *status_label = gtk_label_new ("Status: Active");
-  gtk_box_append (GTK_BOX (bar_box), status_label);
+  // Add content to bar from config
+  for (int i = 0; i < BAR_ITEMS_COUNT; i++)
+    {
+      const BarItem *item = &BAR_ITEMS[i];
+      BarItemData *item_data = &bar_items_data[i];
+      item_data->command = item->command;
+      item_data->interval = item->interval;
+      
+      if (strcmp (item->command, "<separator>") == 0)
+        {
+          // Create separator that expands
+          GtkWidget *separator = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+          gtk_widget_set_hexpand (separator, TRUE);
+          gtk_widget_set_halign (separator, GTK_ALIGN_FILL);
+          item_data->widget = separator;
+          gtk_box_append (GTK_BOX (bar_box), separator);
+        }
+      else
+        {
+          // Create label for command output
+          GtkWidget *label = gtk_label_new ("");
+          gtk_widget_set_halign (label, GTK_ALIGN_START);
+          item_data->widget = label;
+          gtk_box_append (GTK_BOX (bar_box), label);
+          
+          // Execute command immediately
+          update_item (item_data);
+          
+          // Set up periodic updates if interval > 0
+          if (item->interval > 0)
+            {
+              item_data->timeout_id = g_timeout_add_seconds (
+                item->interval,
+                update_item,
+                item_data
+              );
+            }
+        }
+    }
   
   gtk_box_append (GTK_BOX (outer_box), bar_box);
   gtk_window_set_child (GTK_WINDOW (menu_window), outer_box);

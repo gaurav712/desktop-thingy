@@ -14,5 +14,14 @@
 #define BAR_TEXT_SIZE 10
 #define BAR_FONT "monospace"
 
+// Bar items configuration
+typedef struct {
+  const char *command;  // Shell command to execute, or "<separator>" for spacer
+  int interval;         // Update interval in seconds (0 for separator)
+} BarItem;
+
+#define BAR_ITEMS_COUNT 2
+extern const BarItem BAR_ITEMS[BAR_ITEMS_COUNT];
+
 #endif // CONFIG_H
 
