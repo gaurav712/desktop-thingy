@@ -68,6 +68,26 @@ update_item (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+// Cleanup function to free allocated resources
+static void
+cleanup_resources (void)
+{
+  // Remove all timeout sources
+  if (bar_items_data != NULL)
+    {
+      for (int i = 0; i < BAR_ITEMS_COUNT; i++)
+        {
+          if (bar_items_data[i].timeout_id != 0)
+            {
+              g_source_remove (bar_items_data[i].timeout_id);
+              bar_items_data[i].timeout_id = 0;
+            }
+        }
+      g_free (bar_items_data);
+      bar_items_data = NULL;
+    }
+}
+
 static void
 create_menu_bar (GtkApplication *app)
 {
@@ -290,6 +310,8 @@ main (int argc, char **argv)
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);
   int status = g_application_run (G_APPLICATION (app), argc, argv);
   
+  // Cleanup allocated resources
+  cleanup_resources ();
   g_free (background_image_path);
   g_object_unref (app);
   return status;
