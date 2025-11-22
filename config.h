@@ -11,7 +11,7 @@
 #define BAR_BACKGROUND_COLOR "#1D2021"
 #define BAR_BORDER_COLOR "#EBDBB2"
 #define BAR_BACKGROUND_OPACITY 1.0
-#define BAR_TEXT_SIZE 10
+#define BAR_TEXT_SIZE 11
 #define BAR_FONT "CodeNewRoman Nerd Font"
 
 // Bar items configuration
