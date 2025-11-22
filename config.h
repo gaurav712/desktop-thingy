@@ -1,0 +1,15 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// Bar configuration
+#define BAR_PADDING_HORIZONTAL 10
+#define BAR_PADDING_VERTICAL 5
+#define BAR_HEIGHT 30
+#define BAR_BORDER_RADIUS 15
+#define BAR_BORDER_WIDTH 1
+#define BAR_BACKGROUND_COLOR "#1D2021"
+#define BAR_BORDER_COLOR "#FF0000"
+#define BAR_BACKGROUND_OPACITY 1.0
+
+#endif // CONFIG_H
+

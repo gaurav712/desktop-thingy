@@ -1,6 +1,8 @@
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 #include <glib.h>
+#include <stdio.h>
+#include "config.h"
 
 static gchar *background_image_path = NULL;
 
@@ -20,28 +22,72 @@ create_menu_bar (GtkApplication *app)
   gtk_layer_set_anchor (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
   gtk_layer_set_anchor (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
   
-  // Set exclusive zone to reserve space (height in pixels)
-  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_TOP, 0);
-  gtk_layer_set_exclusive_zone (GTK_WINDOW (menu_window), 40);
+  // Set margins for padding (transparent area)
+  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_TOP, BAR_PADDING_VERTICAL);
+  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_LEFT, BAR_PADDING_HORIZONTAL);
+  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_RIGHT, BAR_PADDING_HORIZONTAL);
   
-  // Create menu bar content
-  GtkWidget *menu_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
-  gtk_widget_set_margin_start (menu_box, 10);
-  gtk_widget_set_margin_end (menu_box, 10);
-  gtk_widget_set_margin_top (menu_box, 5);
-  gtk_widget_set_margin_bottom (menu_box, 5);
-  gtk_widget_set_size_request (menu_box, -1, 40);
+  // Set exclusive zone to reserve space (height + vertical padding)
+  gtk_layer_set_exclusive_zone (GTK_WINDOW (menu_window), BAR_HEIGHT + (BAR_PADDING_VERTICAL * 2));
   
+  // Make window background transparent
+  gtk_widget_add_css_class (GTK_WIDGET (menu_window), "transparent-window");
+  
+  // Create outer container with padding (transparent - no background)
+  GtkWidget *outer_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (outer_box, TRUE);
+  gtk_widget_set_halign (outer_box, GTK_ALIGN_FILL);
+  
+  // Create inner bar container (with background, border, etc.)
+  GtkWidget *bar_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_size_request (bar_box, -1, BAR_HEIGHT);
+  gtk_widget_set_hexpand (bar_box, TRUE);
+  gtk_widget_set_halign (bar_box, GTK_ALIGN_FILL);
+  gtk_widget_add_css_class (bar_box, "bar");
+  
+  // Create CSS for the bar and transparent window
+  GtkCssProvider *css_provider = gtk_css_provider_new ();
+  
+  // Convert hex color to rgba for opacity support
+  guint bg_r, bg_g, bg_b;
+  guint border_r, border_g, border_b;
+  sscanf (BAR_BACKGROUND_COLOR, "#%02x%02x%02x", &bg_r, &bg_g, &bg_b);
+  sscanf (BAR_BORDER_COLOR, "#%02x%02x%02x", &border_r, &border_g, &border_b);
+  
+  gchar *css = g_strdup_printf (
+    ".transparent-window {"
+    "  background-color: transparent;"
+    "}"
+    ".bar {"
+    "  background-color: rgba(%u, %u, %u, %.2f);"
+    "  border: %dpx solid rgba(%u, %u, %u, %.2f);"
+    "  border-radius: %dpx;"
+    "  padding: 10px;"
+    "}",
+    bg_r, bg_g, bg_b, BAR_BACKGROUND_OPACITY,
+    BAR_BORDER_WIDTH,
+    border_r, border_g, border_b, BAR_BACKGROUND_OPACITY,
+    BAR_BORDER_RADIUS
+  );
+  
+  gtk_css_provider_load_from_data (css_provider, css, -1);
+  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+                                               GTK_STYLE_PROVIDER (css_provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_free (css);
+  g_object_unref (css_provider);
+  
+  // Add content to bar
   GtkWidget *label = gtk_label_new ("Menu Bar");
-  gtk_box_append (GTK_BOX (menu_box), label);
+  gtk_box_append (GTK_BOX (bar_box), label);
   
-  gtk_box_append (GTK_BOX (menu_box), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
+  gtk_box_append (GTK_BOX (bar_box), gtk_separator_new (GTK_ORIENTATION_VERTICAL));
   
   GtkWidget *status_label = gtk_label_new ("Status: Active");
-  gtk_box_append (GTK_BOX (menu_box), status_label);
+  gtk_box_append (GTK_BOX (bar_box), status_label);
   
-  gtk_widget_set_halign (menu_box, GTK_ALIGN_FILL);
-  gtk_window_set_child (GTK_WINDOW (menu_window), menu_box);
+  gtk_box_append (GTK_BOX (outer_box), bar_box);
+  gtk_window_set_child (GTK_WINDOW (menu_window), outer_box);
   
   gtk_widget_set_visible (menu_window, TRUE);
 }
