@@ -10,6 +10,9 @@ all: $(TARGET)
 $(TARGET): $(SOURCE)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE) $(LDFLAGS)
 
+install: $(TARGET)
+	cp $(TARGET) /usr/local/bin/
+
 clean:
 	rm -f $(TARGET)
 
