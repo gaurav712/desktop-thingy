@@ -13,6 +13,14 @@ typedef struct {
   gchar *new_output;
 } UpdateData;
 
+// Structure to hold weather update data for main thread
+typedef struct {
+  GtkWidget *emoji_widget;
+  GtkWidget *temp_widget;
+  gchar *new_emoji;
+  gchar *new_temp;
+} WeatherUpdateData;
+
 // Structure to hold item widget and update info
 typedef struct {
   GtkWidget *widget;
@@ -28,6 +36,21 @@ typedef struct {
 
 static gchar *background_image_path = NULL;
 static BarItemData *bar_items_data = NULL;
+
+// Structure to hold weather widget and update info
+typedef struct {
+  GtkWidget *emoji_widget;
+  GtkWidget *temp_widget;
+  GThread *thread;
+  gboolean should_stop;
+  gboolean thread_running;
+  GMutex mutex;
+  GCond cond;
+  gchar *previous_emoji;
+  gchar *previous_temp;
+} WeatherData;
+
+static WeatherData *weather_data = NULL;
 
 // Execute command and return output
 static gchar *
@@ -77,6 +100,30 @@ update_ui_from_main_thread (gpointer user_data)
   g_free (update_data);
   
   return G_SOURCE_REMOVE;  // Remove the idle source after execution
+}
+
+// Idle callback to update weather UI from main thread
+static gboolean
+update_weather_ui_from_main_thread (gpointer user_data)
+{
+  WeatherUpdateData *update_data = (WeatherUpdateData *) user_data;
+  
+  if (update_data->emoji_widget != NULL && update_data->new_emoji != NULL)
+    {
+      gtk_label_set_text (GTK_LABEL (update_data->emoji_widget), update_data->new_emoji);
+    }
+  
+  if (update_data->temp_widget != NULL && update_data->new_temp != NULL)
+    {
+      gtk_label_set_text (GTK_LABEL (update_data->temp_widget), update_data->new_temp);
+    }
+  
+  // Free the update data
+  g_free (update_data->new_emoji);
+  g_free (update_data->new_temp);
+  g_free (update_data);
+  
+  return G_SOURCE_REMOVE;
 }
 
 // Worker thread function: polls at module interval and signals main thread on change
@@ -186,6 +233,128 @@ module_worker_thread (gpointer user_data)
   return NULL;
 }
 
+// Weather worker thread function: polls at interval and signals main thread on change
+static gpointer
+weather_worker_thread (gpointer user_data)
+{
+  WeatherData *wdata = (WeatherData *) user_data;
+  
+  // Mark thread as running
+  g_mutex_lock (&wdata->mutex);
+  wdata->thread_running = TRUE;
+  g_mutex_unlock (&wdata->mutex);
+  
+  // Initial update
+  gchar *emoji = execute_command ("curl -s wttr.in/ballia?format=3 | awk '{print $2}'");
+  gchar *temp = execute_command ("curl -s wttr.in/ballia?format=3 | awk '{print $3}' | cut -d \"+\" -f2");
+  
+  if (emoji != NULL || temp != NULL)
+    {
+      g_mutex_lock (&wdata->mutex);
+      if (emoji != NULL)
+        wdata->previous_emoji = g_strdup (emoji);
+      if (temp != NULL)
+        wdata->previous_temp = g_strdup (temp);
+      
+      GtkWidget *emoji_widget = wdata->emoji_widget;
+      GtkWidget *temp_widget = wdata->temp_widget;
+      g_mutex_unlock (&wdata->mutex);
+      
+      WeatherUpdateData *update_data = g_malloc (sizeof (WeatherUpdateData));
+      update_data->emoji_widget = emoji_widget;
+      update_data->temp_widget = temp_widget;
+      update_data->new_emoji = emoji ? g_strdup (emoji) : NULL;
+      update_data->new_temp = temp ? g_strdup (temp) : NULL;
+      g_idle_add (update_weather_ui_from_main_thread, update_data);
+      
+      g_free (emoji);
+      g_free (temp);
+    }
+  
+  // Poll at weather update interval
+  while (TRUE)
+    {
+      g_mutex_lock (&wdata->mutex);
+      
+      // Wait for interval or stop signal
+      gint64 end_time = g_get_monotonic_time () + (WEATHER_UPDATE_INTERVAL * 1000);  // microseconds
+      
+      while (!wdata->should_stop)
+        {
+          if (!g_cond_wait_until (&wdata->cond, &wdata->mutex, end_time))
+            {
+              break;
+            }
+          if (wdata->should_stop)
+            break;
+        }
+      
+      if (wdata->should_stop)
+        {
+          g_mutex_unlock (&wdata->mutex);
+          break;
+        }
+      g_mutex_unlock (&wdata->mutex);
+      
+      // Execute commands to get new weather data
+      emoji = execute_command ("curl -s wttr.in/ballia?format=3 | awk '{print $2}'");
+      temp = execute_command ("curl -s wttr.in/ballia?format=3 | awk '{print $3}' | cut -d \"+\" -f2");
+      
+      if (emoji != NULL || temp != NULL)
+        {
+          g_mutex_lock (&wdata->mutex);
+          
+          gboolean emoji_changed = FALSE;
+          gboolean temp_changed = FALSE;
+          
+          if (emoji != NULL && (wdata->previous_emoji == NULL || strcmp (wdata->previous_emoji, emoji) != 0))
+            {
+              emoji_changed = TRUE;
+              g_free (wdata->previous_emoji);
+              wdata->previous_emoji = g_strdup (emoji);
+            }
+          
+          if (temp != NULL && (wdata->previous_temp == NULL || strcmp (wdata->previous_temp, temp) != 0))
+            {
+              temp_changed = TRUE;
+              g_free (wdata->previous_temp);
+              wdata->previous_temp = g_strdup (temp);
+            }
+          
+          if (emoji_changed || temp_changed)
+            {
+              GtkWidget *emoji_widget = wdata->emoji_widget;
+              GtkWidget *temp_widget = wdata->temp_widget;
+              
+              WeatherUpdateData *update_data = g_malloc (sizeof (WeatherUpdateData));
+              update_data->emoji_widget = emoji_widget;
+              update_data->temp_widget = temp_widget;
+              update_data->new_emoji = emoji_changed && emoji ? g_strdup (emoji) : NULL;
+              update_data->new_temp = temp_changed && temp ? g_strdup (temp) : NULL;
+              
+              g_mutex_unlock (&wdata->mutex);
+              
+              g_idle_add (update_weather_ui_from_main_thread, update_data);
+            }
+          else
+            {
+              g_mutex_unlock (&wdata->mutex);
+            }
+          
+          g_free (emoji);
+          g_free (temp);
+        }
+    }
+  
+  // Mark thread as no longer running
+  g_mutex_lock (&wdata->mutex);
+  wdata->thread_running = FALSE;
+  g_cond_signal (&wdata->cond);
+  g_mutex_unlock (&wdata->mutex);
+  
+  return NULL;
+}
+
 // Cleanup function to free allocated resources
 static void
 cleanup_resources (void)
@@ -253,6 +422,57 @@ cleanup_resources (void)
         }
       g_free (bar_items_data);
       bar_items_data = NULL;
+    }
+  
+  // Cleanup weather thread
+  if (weather_data != NULL)
+    {
+      g_mutex_lock (&weather_data->mutex);
+      GThread *thread = weather_data->thread;
+      if (thread != NULL)
+        {
+          weather_data->should_stop = TRUE;
+          g_cond_signal (&weather_data->cond);
+          weather_data->thread = NULL;
+        }
+      g_mutex_unlock (&weather_data->mutex);
+      
+      if (thread != NULL)
+        {
+          // Wait for thread to finish with timeout
+          gint timeout = 50;  // 50 * 100ms = 5 seconds
+          while (timeout > 0)
+            {
+              g_mutex_lock (&weather_data->mutex);
+              gboolean running = weather_data->thread_running;
+              g_mutex_unlock (&weather_data->mutex);
+              
+              if (!running)
+                break;
+              
+              g_usleep (100000);  // 100ms
+              timeout--;
+            }
+          
+          g_thread_join (thread);
+        }
+      
+      // Clean up mutex and condition variable
+      g_cond_clear (&weather_data->cond);
+      g_mutex_clear (&weather_data->mutex);
+      
+      // Free stored previous data
+      if (weather_data->previous_emoji != NULL)
+        {
+          g_free (weather_data->previous_emoji);
+        }
+      if (weather_data->previous_temp != NULL)
+        {
+          g_free (weather_data->previous_temp);
+        }
+      
+      g_free (weather_data);
+      weather_data = NULL;
     }
 }
 
@@ -524,6 +744,25 @@ create_day_text (GtkApplication *app)
   // Append align container to main vertical box
   gtk_box_append (GTK_BOX (vbox), align_container);
   
+  // Create a container for weather that matches the width of align_container
+  GtkWidget *weather_container = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_halign (weather_container, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (weather_container, FALSE);
+  gtk_widget_add_css_class (weather_container, "date-align-container");
+  
+  // Create weather module (aligned to right edge of day text, below day text)
+  GtkWidget *weather_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_halign (weather_box, GTK_ALIGN_FILL);
+  gtk_widget_set_hexpand (weather_box, TRUE);  // Expand to fill container width
+  
+  // Add expanding spacer to push weather content to the right
+  GtkWidget *weather_spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (weather_spacer, TRUE);
+  gtk_box_append (GTK_BOX (weather_box), weather_spacer);
+  
+  // Add weather box to weather container
+  gtk_box_append (GTK_BOX (weather_container), weather_box);
+  
   // Create CSS for the day text, month text, and day number text
   GtkCssProvider *css_provider = gtk_css_provider_new ();
   
@@ -566,6 +805,28 @@ create_day_text (GtkApplication *app)
     "  margin-right: %dpx;"
     "  margin-bottom: %dpx;"
     "  margin-left: %dpx;"
+    "}"
+    ".weather-emoji {"
+    "  color: rgba(255, 255, 255, 1.0);"
+    "  background-color: transparent;"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  letter-spacing: %dpx;"
+    "  margin-top: %dpx;"
+    "  margin-right: %dpx;"
+    "  margin-bottom: %dpx;"
+    "  margin-left: %dpx;"
+    "}"
+    ".weather-temp {"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  color: rgba(255, 255, 255, 1.0);"
+    "  background-color: transparent;"
+    "  letter-spacing: %dpx;"
+    "  margin-top: %dpx;"
+    "  margin-right: %dpx;"
+    "  margin-bottom: %dpx;"
+    "  margin-left: %dpx;"
     "}",
     DAY_TEXT_FONT,
     DAY_TEXT_SIZE,
@@ -587,7 +848,21 @@ create_day_text (GtkApplication *app)
     DAY_NUMBER_TEXT_MARGIN_TOP,
     DAY_NUMBER_TEXT_MARGIN_RIGHT,
     DAY_NUMBER_TEXT_MARGIN_BOTTOM,
-    DAY_NUMBER_TEXT_MARGIN_LEFT
+    DAY_NUMBER_TEXT_MARGIN_LEFT,
+    WEATHER_EMOJI_FONT,
+    WEATHER_EMOJI_SIZE,
+    WEATHER_EMOJI_LETTER_SPACING,
+    WEATHER_EMOJI_MARGIN_TOP,
+    WEATHER_EMOJI_MARGIN_RIGHT,
+    WEATHER_EMOJI_MARGIN_BOTTOM,
+    WEATHER_EMOJI_MARGIN_LEFT,
+    WEATHER_TEMP_FONT,
+    WEATHER_TEMP_SIZE,
+    WEATHER_TEMP_LETTER_SPACING,
+    WEATHER_TEMP_MARGIN_TOP,
+    WEATHER_TEMP_MARGIN_RIGHT,
+    WEATHER_TEMP_MARGIN_BOTTOM,
+    WEATHER_TEMP_MARGIN_LEFT
   );
   
   gtk_css_provider_load_from_string (css_provider, css);
@@ -596,6 +871,52 @@ create_day_text (GtkApplication *app)
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   g_free (css);
   g_object_unref (css_provider);
+  
+  // Create label for weather emoji
+  GtkWidget *weather_emoji_label = gtk_label_new ("");
+  gtk_widget_set_halign (weather_emoji_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class (weather_emoji_label, "weather-emoji");
+  
+  // Create label for weather temperature
+  GtkWidget *weather_temp_label = gtk_label_new ("");
+  gtk_widget_set_halign (weather_temp_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class (weather_temp_label, "weather-temp");
+  
+  // Append emoji and temperature to weather box
+  gtk_box_append (GTK_BOX (weather_box), weather_emoji_label);
+  gtk_box_append (GTK_BOX (weather_box), weather_temp_label);
+  
+  // Append weather container to main vertical box
+  gtk_box_append (GTK_BOX (vbox), weather_container);
+  
+  // Initialize weather data structure
+  weather_data = g_malloc0 (sizeof (WeatherData));
+  weather_data->emoji_widget = weather_emoji_label;
+  weather_data->temp_widget = weather_temp_label;
+  weather_data->should_stop = FALSE;
+  weather_data->thread_running = FALSE;
+  weather_data->previous_emoji = NULL;
+  weather_data->previous_temp = NULL;
+  weather_data->thread = NULL;
+  g_mutex_init (&weather_data->mutex);
+  g_cond_init (&weather_data->cond);
+  
+  // Spawn weather worker thread
+  GError *error = NULL;
+  weather_data->thread = g_thread_try_new (
+    "weather-worker",
+    weather_worker_thread,
+    weather_data,
+    &error
+  );
+  
+  if (weather_data->thread == NULL)
+    {
+      g_printerr ("Failed to create weather thread: %s\n",
+                 error ? error->message : "Unknown error");
+      if (error)
+        g_error_free (error);
+    }
   
   gtk_window_set_child (GTK_WINDOW (day_window), vbox);
   gtk_widget_set_visible (day_window, TRUE);

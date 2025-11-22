@@ -41,6 +41,23 @@
 #define DAY_NUMBER_TEXT_MARGIN_BOTTOM 0
 #define DAY_NUMBER_TEXT_MARGIN_LEFT 10
 
+// Weather text configuration
+#define WEATHER_EMOJI_FONT "Apple Color Emoji"
+#define WEATHER_EMOJI_SIZE 30
+#define WEATHER_EMOJI_LETTER_SPACING 0
+#define WEATHER_EMOJI_MARGIN_TOP 10
+#define WEATHER_EMOJI_MARGIN_RIGHT 0
+#define WEATHER_EMOJI_MARGIN_BOTTOM 0
+#define WEATHER_EMOJI_MARGIN_LEFT 5
+#define WEATHER_TEMP_FONT "Computerfont"
+#define WEATHER_TEMP_SIZE 36
+#define WEATHER_TEMP_LETTER_SPACING 5
+#define WEATHER_TEMP_MARGIN_TOP 10
+#define WEATHER_TEMP_MARGIN_RIGHT 0
+#define WEATHER_TEMP_MARGIN_BOTTOM 0
+#define WEATHER_TEMP_MARGIN_LEFT 5
+#define WEATHER_UPDATE_INTERVAL 300000  // 5 minutes in milliseconds
+
 // Bar items configuration
 typedef struct {
   const char *command;  // Shell command to execute, or "<separator>" for spacer
