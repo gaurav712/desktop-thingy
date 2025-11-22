@@ -16,10 +16,10 @@ typedef struct {
 
 // Define the items array
 const BarItem BAR_ITEMS[BAR_ITEMS_COUNT] = {
-  {"focused=$(hyprctl activeworkspace 2>/dev/null | grep -o '[0-9]\\+' | head -1); hyprctl workspaces 2>/dev/null | awk -v f=\"$focused\" 'BEGIN {empty=\"󱓼 \"; has_windows=\"󱨈 \"; active=\"󱓻 \"} /^workspace ID/ {ws=$3} /^[[:space:]]*windows:/ {if($2>0 && ws) arr[ws]=1} END {for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) printf \"%s\", has_windows; else printf \"%s\", empty}}'", 1 },
-  { "hyprctl activewindow 2>/dev/null | grep 'title:' | sed 's/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'", 1 },
+  {"focused=$(hyprctl activeworkspace 2>/dev/null | grep -o '[0-9]\\+' | head -1); hyprctl workspaces 2>/dev/null | awk -v f=\"$focused\" 'BEGIN {empty=\"󱓼 \"; has_windows=\"󱨈 \"; active=\"󱓻 \"} /^workspace ID/ {ws=$3} /^[[:space:]]*windows:/ {if($2>0 && ws) arr[ws]=1} END {for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) printf \"%s\", has_windows; else printf \"%s\", empty}}'", 500 },
+  { "hyprctl activewindow 2>/dev/null | grep 'title:' | sed 's/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'", 500 },
   { "<separator>", 0 },
-  { "status", 1 }
+  { "status", 1000 }
 };
 
 static gchar *background_image_path = NULL;
@@ -205,7 +205,7 @@ create_menu_bar (GtkApplication *app)
           // Set up periodic updates if interval > 0
           if (item->interval > 0)
             {
-              item_data->timeout_id = g_timeout_add_seconds (
+              item_data->timeout_id = g_timeout_add (
                 item->interval,
                 update_item,
                 item_data

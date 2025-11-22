@@ -17,7 +17,7 @@
 // Bar items configuration
 typedef struct {
   const char *command;  // Shell command to execute, or "<separator>" for spacer
-  float interval;       // Update interval in seconds (0 for separator)
+  int interval;         // Update interval in milliseconds (0 for separator)
 } BarItem;
 
 #define BAR_ITEMS_COUNT 4
