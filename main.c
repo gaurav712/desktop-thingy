@@ -429,20 +429,27 @@ create_menu_bar (GtkApplication *app)
 static void
 create_day_text (GtkApplication *app)
 {
-  // Get current day name
+  // Get current date information
   time_t rawtime;
   struct tm *timeinfo;
   char day_name[32];
+  char month_name[32];
+  char day_number[8];
   
   time (&rawtime);
   timeinfo = localtime (&rawtime);
   strftime (day_name, sizeof (day_name), "%A", timeinfo);
+  strftime (month_name, sizeof (month_name), "%B", timeinfo);
+  strftime (day_number, sizeof (day_number), "%d", timeinfo);
   
-  // Convert to uppercase
-  for (int i = 0; day_name[i]; i++)
-    {
-      day_name[i] = g_ascii_toupper (day_name[i]);
-    }
+  // Convert day name to uppercase
+  for (int i = 0; day_name[i]; i++) {
+    day_name[i] = g_ascii_toupper (day_name[i]);
+  }
+
+  for (int i = 0; month_name[i]; i++) {
+    month_name[i] = g_ascii_toupper (month_name[i]);
+  }
   
   // Create day text window
   GtkWidget *day_window = gtk_application_window_new (app);
@@ -471,18 +478,61 @@ create_day_text (GtkApplication *app)
   // Make window background transparent
   gtk_widget_add_css_class (GTK_WIDGET (day_window), "transparent-day-window");
   
-  // Create centered label for day text
+  // Create vertical box to stack month+day and day name
+  GtkWidget *vbox = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_halign (vbox, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (vbox, GTK_ALIGN_CENTER);
+  
+  // Create a centered container - both rows will be left-aligned within it
+  // This ensures their left edges align, while the container itself is centered
+  GtkWidget *align_container = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_halign (align_container, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (align_container, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (align_container, FALSE);
+  gtk_widget_add_css_class (align_container, "date-align-container");
+  
+  // Create horizontal box for month and day number
+  GtkWidget *month_day_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_halign (month_day_box, GTK_ALIGN_START);
+  gtk_widget_set_hexpand (month_day_box, FALSE);
+  
+  // Create label for month name
+  GtkWidget *month_label = gtk_label_new (month_name);
+  gtk_widget_set_halign (month_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class (month_label, "month-text");
+  
+  // Create label for day number
+  GtkWidget *day_number_label = gtk_label_new (day_number);
+  gtk_widget_set_halign (day_number_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class (day_number_label, "day-number-text");
+  
+  // Append month and day number to horizontal box
+  gtk_box_append (GTK_BOX (month_day_box), month_label);
+  gtk_box_append (GTK_BOX (month_day_box), day_number_label);
+  
+  // Create label for day name - text centered, but container left-aligned to match month+day
   GtkWidget *day_label = gtk_label_new (day_name);
-  gtk_widget_set_halign (day_label, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign (day_label, GTK_ALIGN_CENTER);
+  gtk_label_set_xalign (GTK_LABEL (day_label), 0.5);  // Center text within label
+  gtk_widget_set_halign (day_label, GTK_ALIGN_FILL);
+  gtk_widget_set_hexpand (day_label, TRUE);
   gtk_widget_add_css_class (day_label, "day-text");
   
-  // Create CSS for the day text
+  // Append month+day box and day label to align container (both left-aligned)
+  gtk_box_append (GTK_BOX (align_container), month_day_box);
+  gtk_box_append (GTK_BOX (align_container), day_label);
+  
+  // Append align container to main vertical box
+  gtk_box_append (GTK_BOX (vbox), align_container);
+  
+  // Create CSS for the day text, month text, and day number text
   GtkCssProvider *css_provider = gtk_css_provider_new ();
   
   gchar *css = g_strdup_printf (
     ".transparent-day-window {"
     "  background-color: transparent;"
+    "}"
+    ".date-align-container {"
+    "  min-width: 800px;"
     "}"
     ".day-text {"
     "  font-family: %s;"
@@ -490,10 +540,54 @@ create_day_text (GtkApplication *app)
     "  color: rgba(255, 255, 255, 1.0);"
     "  background-color: transparent;"
     "  letter-spacing: %dpx;"
+    "  margin-top: %dpx;"
+    "  margin-right: %dpx;"
+    "  margin-bottom: %dpx;"
+    "  margin-left: %dpx;"
+    "}"
+    ".month-text {"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  color: rgba(255, 255, 255, 1.0);"
+    "  background-color: transparent;"
+    "  letter-spacing: %dpx;"
+    "  margin-top: %dpx;"
+    "  margin-right: %dpx;"
+    "  margin-bottom: %dpx;"
+    "  margin-left: %dpx;"
+    "}"
+    ".day-number-text {"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  color: rgba(255, 255, 255, 1.0);"
+    "  background-color: transparent;"
+    "  letter-spacing: %dpx;"
+    "  margin-top: %dpx;"
+    "  margin-right: %dpx;"
+    "  margin-bottom: %dpx;"
+    "  margin-left: %dpx;"
     "}",
     DAY_TEXT_FONT,
     DAY_TEXT_SIZE,
-    DAY_TEXT_LETTER_SPACING
+    DAY_TEXT_LETTER_SPACING,
+    DAY_TEXT_MARGIN_TOP,
+    DAY_TEXT_MARGIN_RIGHT,
+    DAY_TEXT_MARGIN_BOTTOM,
+    DAY_TEXT_MARGIN_LEFT,
+    MONTH_TEXT_FONT,
+    MONTH_TEXT_SIZE,
+    MONTH_TEXT_LETTER_SPACING,
+    MONTH_TEXT_MARGIN_TOP,
+    MONTH_TEXT_MARGIN_RIGHT,
+    MONTH_TEXT_MARGIN_BOTTOM,
+    MONTH_TEXT_MARGIN_LEFT,
+    DAY_NUMBER_TEXT_FONT,
+    DAY_NUMBER_TEXT_SIZE,
+    DAY_NUMBER_TEXT_LETTER_SPACING,
+    DAY_NUMBER_TEXT_MARGIN_TOP,
+    DAY_NUMBER_TEXT_MARGIN_RIGHT,
+    DAY_NUMBER_TEXT_MARGIN_BOTTOM,
+    DAY_NUMBER_TEXT_MARGIN_LEFT
   );
   
   gtk_css_provider_load_from_string (css_provider, css);
@@ -503,7 +597,7 @@ create_day_text (GtkApplication *app)
   g_free (css);
   g_object_unref (css_provider);
   
-  gtk_window_set_child (GTK_WINDOW (day_window), day_label);
+  gtk_window_set_child (GTK_WINDOW (day_window), vbox);
   gtk_widget_set_visible (day_window, TRUE);
 }
 

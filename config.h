@@ -18,6 +18,28 @@
 #define DAY_TEXT_FONT "Anurati"
 #define DAY_TEXT_SIZE 90
 #define DAY_TEXT_LETTER_SPACING 5
+#define DAY_TEXT_MARGIN_TOP 20
+#define DAY_TEXT_MARGIN_RIGHT 0
+#define DAY_TEXT_MARGIN_BOTTOM 0
+#define DAY_TEXT_MARGIN_LEFT 0
+
+// Month text configuration
+#define MONTH_TEXT_FONT "Anurati"
+#define MONTH_TEXT_SIZE 30
+#define MONTH_TEXT_LETTER_SPACING 5
+#define MONTH_TEXT_MARGIN_TOP 0
+#define MONTH_TEXT_MARGIN_RIGHT 0
+#define MONTH_TEXT_MARGIN_BOTTOM 0
+#define MONTH_TEXT_MARGIN_LEFT 0
+
+// Day number text configuration
+#define DAY_NUMBER_TEXT_FONT "Computerfont"
+#define DAY_NUMBER_TEXT_SIZE 36
+#define DAY_NUMBER_TEXT_LETTER_SPACING 5
+#define DAY_NUMBER_TEXT_MARGIN_TOP -10
+#define DAY_NUMBER_TEXT_MARGIN_RIGHT 0
+#define DAY_NUMBER_TEXT_MARGIN_BOTTOM 0
+#define DAY_NUMBER_TEXT_MARGIN_LEFT 10
 
 // Bar items configuration
 typedef struct {
