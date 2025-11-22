@@ -23,12 +23,12 @@ create_menu_bar (GtkApplication *app)
   gtk_layer_set_anchor (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
   
   // Set margins for padding (transparent area)
-  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_TOP, BAR_PADDING_VERTICAL);
+  gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_TOP, BAR_PADDING_TOP);
   gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_LEFT, BAR_PADDING_HORIZONTAL);
   gtk_layer_set_margin (GTK_WINDOW (menu_window), GTK_LAYER_SHELL_EDGE_RIGHT, BAR_PADDING_HORIZONTAL);
   
-  // Set exclusive zone to reserve space (height + vertical padding)
-  gtk_layer_set_exclusive_zone (GTK_WINDOW (menu_window), BAR_HEIGHT + (BAR_PADDING_VERTICAL * 2));
+  // Set exclusive zone to reserve space (height + top and bottom padding)
+  gtk_layer_set_exclusive_zone (GTK_WINDOW (menu_window), BAR_HEIGHT + BAR_PADDING_TOP + BAR_PADDING_BOTTOM);
   
   // Make window background transparent
   gtk_widget_add_css_class (GTK_WIDGET (menu_window), "transparent-window");
@@ -41,8 +41,10 @@ create_menu_bar (GtkApplication *app)
   // Create inner bar container (with background, border, etc.)
   GtkWidget *bar_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_set_size_request (bar_box, -1, BAR_HEIGHT);
+  gtk_widget_set_vexpand (bar_box, FALSE);
   gtk_widget_set_hexpand (bar_box, TRUE);
   gtk_widget_set_halign (bar_box, GTK_ALIGN_FILL);
+  gtk_widget_set_valign (bar_box, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class (bar_box, "bar");
   
   // Create CSS for the bar and transparent window
@@ -60,14 +62,36 @@ create_menu_bar (GtkApplication *app)
     "}"
     ".bar {"
     "  background-color: rgba(%u, %u, %u, %.2f);"
-    "  border: %dpx solid rgba(%u, %u, %u, %.2f);"
+    "  border: %.2fpx solid rgba(%u, %u, %u, %.2f);"
     "  border-radius: %dpx;"
-    "  padding: 10px;"
+    "  padding-left: 10px;"
+    "  padding-right: 10px;"
+    "  padding-top: 0px;"
+    "  padding-bottom: 0px;"
+    "  min-height: %dpx;"
+    "  max-height: %dpx;"
+    "  height: %dpx;"
+    "  overflow: hidden;"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "}"
+    ".bar label {"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  margin-top: 0px;"
+    "  margin-bottom: 0px;"
     "}",
     bg_r, bg_g, bg_b, BAR_BACKGROUND_OPACITY,
     BAR_BORDER_WIDTH,
     border_r, border_g, border_b, BAR_BACKGROUND_OPACITY,
-    BAR_BORDER_RADIUS
+    BAR_BORDER_RADIUS,
+    BAR_HEIGHT,
+    BAR_HEIGHT,
+    BAR_HEIGHT,
+    BAR_FONT,
+    BAR_TEXT_SIZE,
+    BAR_FONT,
+    BAR_TEXT_SIZE
   );
   
   gtk_css_provider_load_from_data (css_provider, css, -1);
@@ -109,6 +133,16 @@ activate (GtkApplication *app, gpointer user_data)
   gtk_layer_set_anchor (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
   gtk_layer_set_anchor (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
   gtk_layer_set_anchor (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+  
+  // Ensure no margins - background should cover entire screen
+  gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_TOP, 0);
+  gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
+  gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
+  gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
+  
+  // Set exclusive zone to -1 to ensure background always covers full screen
+  // and doesn't respect exclusive zones from other windows
+  gtk_layer_set_exclusive_zone (GTK_WINDOW (window), -1);
   
   // Set background image if provided
   if (background_image_path != NULL)
