@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include "config.h"
 
 // Structure to hold update data for main thread
@@ -426,6 +427,87 @@ create_menu_bar (GtkApplication *app)
 }
 
 static void
+create_day_text (GtkApplication *app)
+{
+  // Get current day name
+  time_t rawtime;
+  struct tm *timeinfo;
+  char day_name[32];
+  
+  time (&rawtime);
+  timeinfo = localtime (&rawtime);
+  strftime (day_name, sizeof (day_name), "%A", timeinfo);
+  
+  // Convert to uppercase
+  for (int i = 0; day_name[i]; i++)
+    {
+      day_name[i] = g_ascii_toupper (day_name[i]);
+    }
+  
+  // Create day text window
+  GtkWidget *day_window = gtk_application_window_new (app);
+  gtk_layer_init_for_window (GTK_WINDOW (day_window));
+  gtk_layer_set_namespace (GTK_WINDOW (day_window), "day-text");
+  gtk_layer_set_layer (GTK_WINDOW (day_window), GTK_LAYER_SHELL_LAYER_BACKGROUND);
+  
+  // Disable keyboard interactivity so it stays behind other layer shell windows
+  gtk_layer_set_keyboard_mode (GTK_WINDOW (day_window), GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+  
+  // Anchor to all edges to cover the entire screen
+  gtk_layer_set_anchor (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+  gtk_layer_set_anchor (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+  gtk_layer_set_anchor (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+  gtk_layer_set_anchor (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+  
+  // Ensure no margins - should cover entire screen
+  gtk_layer_set_margin (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_TOP, 0);
+  gtk_layer_set_margin (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
+  gtk_layer_set_margin (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
+  gtk_layer_set_margin (GTK_WINDOW (day_window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
+  
+  // Set exclusive zone to -1 (above background which is -2)
+  gtk_layer_set_exclusive_zone (GTK_WINDOW (day_window), -1);
+  
+  // Make window background transparent
+  gtk_widget_add_css_class (GTK_WIDGET (day_window), "transparent-day-window");
+  
+  // Create centered label for day text
+  GtkWidget *day_label = gtk_label_new (day_name);
+  gtk_widget_set_halign (day_label, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (day_label, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class (day_label, "day-text");
+  
+  // Create CSS for the day text
+  GtkCssProvider *css_provider = gtk_css_provider_new ();
+  
+  gchar *css = g_strdup_printf (
+    ".transparent-day-window {"
+    "  background-color: transparent;"
+    "}"
+    ".day-text {"
+    "  font-family: %s;"
+    "  font-size: %dpt;"
+    "  color: rgba(255, 255, 255, 1.0);"
+    "  background-color: transparent;"
+    "  letter-spacing: %dpx;"
+    "}",
+    DAY_TEXT_FONT,
+    DAY_TEXT_SIZE,
+    DAY_TEXT_LETTER_SPACING
+  );
+  
+  gtk_css_provider_load_from_string (css_provider, css);
+  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+                                               GTK_STYLE_PROVIDER (css_provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_free (css);
+  g_object_unref (css_provider);
+  
+  gtk_window_set_child (GTK_WINDOW (day_window), day_label);
+  gtk_widget_set_visible (day_window, TRUE);
+}
+
+static void
 activate (GtkApplication *app, gpointer user_data)
 {
   // Create background window
@@ -449,9 +531,9 @@ activate (GtkApplication *app, gpointer user_data)
   gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
   gtk_layer_set_margin (GTK_WINDOW (window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
   
-  // Set exclusive zone to -1 to ensure background always covers full screen
+  // Set exclusive zone to -2 to ensure background always covers full screen
   // and doesn't respect exclusive zones from other windows
-  gtk_layer_set_exclusive_zone (GTK_WINDOW (window), -1);
+  gtk_layer_set_exclusive_zone (GTK_WINDOW (window), -2);
   
   // Set background image if provided
   if (background_image_path != NULL)
@@ -469,6 +551,9 @@ activate (GtkApplication *app, gpointer user_data)
     }
   
   gtk_widget_set_visible (window, TRUE);
+  
+  // Create day text window (on layer -1, above background)
+  create_day_text (app);
   
   // Create menu bar window
   create_menu_bar (app);

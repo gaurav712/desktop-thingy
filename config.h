@@ -14,6 +14,11 @@
 #define BAR_TEXT_SIZE 11
 #define BAR_FONT "CodeNewRoman Nerd Font"
 
+// Day text configuration
+#define DAY_TEXT_FONT "Anurati"
+#define DAY_TEXT_SIZE 90
+#define DAY_TEXT_LETTER_SPACING 5
+
 // Bar items configuration
 typedef struct {
   const char *command;  // Shell command to execute, or "<separator>" for spacer
