@@ -56,23 +56,31 @@
 #define WEATHER_TEMP_MARGIN_RIGHT 0
 #define WEATHER_TEMP_MARGIN_BOTTOM 0
 #define WEATHER_TEMP_MARGIN_LEFT 5
-#define WEATHER_UPDATE_INTERVAL 300000  // 5 minutes in milliseconds
+#define WEATHER_UPDATE_INTERVAL 300000 // 5 minutes in milliseconds
 
 // Bar items configuration
 typedef struct {
-  const char *command;  // Shell command to execute, or "<separator>" for spacer
-  int interval;         // Update interval in milliseconds (0 for separator)
+  const char *command; // Shell command to execute, or "<separator>" for spacer
+  int interval;        // Update interval in milliseconds (0 for separator)
 } BarItem;
 
 // Define the items array
 static const BarItem BAR_ITEMS[] = {
-  {"focused=$(hyprctl activeworkspace 2>/dev/null | grep -o '[0-9]\\+' | head -1); hyprctl workspaces 2>/dev/null | awk -v f=\"$focused\" 'BEGIN {empty=\"󱓼 \"; has_windows=\"󱨈 \"; active=\"󱓻 \"} /^workspace ID/ {ws=$3} /^[[:space:]]*windows:/ {if($2>0 && ws) arr[ws]=1} END {for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) printf \"%s\", has_windows; else printf \"%s\", empty}}'", 500 },
-  { "title=$(hyprctl activewindow 2>/dev/null | grep 'title:' | sed 's/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); if [ ${#title} -gt 70 ]; then title=\"${title:0:70}...\"; fi; printf \"$title\"", 500 },
-  { "<separator>", 0 },
-  { "status", 500 }
-};
+    {"focused=$(hyprctl activeworkspace 2>/dev/null | grep -o '[0-9]\\+' | "
+     "head -1); hyprctl workspaces 2>/dev/null | awk -v f=\"$focused\" 'BEGIN "
+     "{empty=\"󱓼 \"; has_windows=\"󱨈 \"; active=\"󱓻 \"} /^workspace "
+     "ID/ {ws=$3} /^[[:space:]]*windows:/ {if($2>0 && ws) arr[ws]=1} END "
+     "{for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) "
+     "printf \"%s\", has_windows; else printf \"%s\", empty}}'",
+     500},
+    {"title=$(hyprctl activewindow 2>/dev/null | grep 'title:' | sed "
+     "'s/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); if [ "
+     "${#title} -gt 70 ]; then title=\"${title:0:70}...\"; fi; printf "
+     "\"$title\"",
+     500},
+    {"<separator>", 0},
+    {"status", 500}};
 
 #define BAR_ITEMS_COUNT (sizeof(BAR_ITEMS) / sizeof(BAR_ITEMS[0]))
 
 #endif // CONFIG_H
-
