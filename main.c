@@ -715,14 +715,12 @@ static void create_day_text(GtkApplication *app) {
 
   // Create a container for weather that matches the width of align_container
   GtkWidget *weather_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_halign(weather_container, GTK_ALIGN_CENTER);
-  gtk_widget_set_hexpand(weather_container, FALSE);
+  gtk_widget_set_halign(weather_container, GTK_ALIGN_END);
+  gtk_widget_set_hexpand(weather_container, TRUE);
   gtk_widget_add_css_class(weather_container, "date-align-container");
 
   // Create weather module (aligned to right edge of day text, below day text)
   GtkWidget *weather_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-  gtk_widget_set_halign(weather_box, GTK_ALIGN_FILL);
-  gtk_widget_set_hexpand(weather_box, TRUE); // Expand to fill container width
 
   // Add expanding spacer to push weather content to the right
   GtkWidget *weather_spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -739,9 +737,7 @@ static void create_day_text(GtkApplication *app) {
       ".transparent-day-window {"
       "  background-color: transparent;"
       "}"
-      ".date-align-container {"
-      "  min-width: 800px;"
-      "}"
+      ".date-align-container {}"
       ".day-text {"
       "  font-family: %s;"
       "  font-size: %dpt;"
