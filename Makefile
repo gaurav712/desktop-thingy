@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -g $(shell pkg-config --cflags gtk4-layer-shell-0 gtk4)
+CFLAGS = -Wall -Wextra -Werror -O3 $(shell pkg-config --cflags gtk4-layer-shell-0 gtk4)
 LDFLAGS = $(shell pkg-config --libs gtk4-layer-shell-0 gtk4)
 
 TARGET = desktop-thingy

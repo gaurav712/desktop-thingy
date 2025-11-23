@@ -357,7 +357,7 @@ static gpointer weather_worker_thread(gpointer user_data) {
 static void cleanup_resources(void) {
   // Stop all worker threads and free resources
   if (bar_items_data != NULL) {
-    for (int i = 0; i < BAR_ITEMS_COUNT; i++) {
+    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
       BarItemData *item_data = &bar_items_data[i];
 
       // Signal thread to stop
@@ -553,7 +553,7 @@ static void create_menu_bar(GtkApplication *app) {
   bar_items_data = g_malloc0(sizeof(BarItemData) * BAR_ITEMS_COUNT);
 
   // Add content to bar from config
-  for (int i = 0; i < BAR_ITEMS_COUNT; i++) {
+  for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
     const BarItem *item = &BAR_ITEMS[i];
     BarItemData *item_data = &bar_items_data[i];
     item_data->command = item->command;
@@ -589,7 +589,7 @@ static void create_menu_bar(GtkApplication *app) {
             "module-worker", module_worker_thread, item_data, &error);
 
         if (item_data->thread == NULL) {
-          g_printerr("Failed to create thread for module %d: %s\n", i,
+          g_printerr("Failed to create thread for module %zu: %s\n", i,
                      error ? error->message : "Unknown error");
           if (error)
             g_error_free(error);
@@ -858,7 +858,7 @@ static void create_day_text(GtkApplication *app) {
   gtk_widget_set_visible(day_window, TRUE);
 }
 
-static void activate(GtkApplication *app, gpointer user_data) {
+static void activate(GtkApplication *app) {
   // Create background window
   GtkWidget *window = gtk_application_window_new(app);
   gtk_layer_init_for_window(GTK_WINDOW(window));
