@@ -21,6 +21,16 @@ typedef struct {
   gchar *new_temp;
 } WeatherUpdateData;
 
+// Structure to hold date update data for main thread
+typedef struct {
+  GtkWidget *day_widget;
+  GtkWidget *month_widget;
+  GtkWidget *day_number_widget;
+  gchar *new_day;
+  gchar *new_month;
+  gchar *new_day_number;
+} DateUpdateData;
+
 // Structure to hold item widget and update info
 typedef struct {
   GtkWidget *widget;
@@ -51,6 +61,23 @@ typedef struct {
 } WeatherData;
 
 static WeatherData *weather_data = NULL;
+
+// Structure to hold date widget and update info
+typedef struct {
+  GtkWidget *day_widget;
+  GtkWidget *month_widget;
+  GtkWidget *day_number_widget;
+  GThread *thread;
+  gboolean should_stop;
+  gboolean thread_running;
+  GMutex mutex;
+  GCond cond;
+  gchar *previous_day;
+  gchar *previous_month;
+  gchar *previous_day_number;
+} DateData;
+
+static DateData *date_data = NULL;
 
 // Execute command and return output
 static gchar *execute_command(const char *command) {
@@ -113,6 +140,35 @@ static gboolean update_weather_ui_from_main_thread(gpointer user_data) {
   // Free the update data
   g_free(update_data->new_emoji);
   g_free(update_data->new_temp);
+  g_free(update_data);
+
+  return G_SOURCE_REMOVE;
+}
+
+// Idle callback to update date UI from main thread
+static gboolean update_date_ui_from_main_thread(gpointer user_data) {
+  DateUpdateData *update_data = (DateUpdateData *)user_data;
+
+  if (update_data->day_widget != NULL && update_data->new_day != NULL) {
+    gtk_label_set_text(GTK_LABEL(update_data->day_widget),
+                       update_data->new_day);
+  }
+
+  if (update_data->month_widget != NULL && update_data->new_month != NULL) {
+    gtk_label_set_text(GTK_LABEL(update_data->month_widget),
+                       update_data->new_month);
+  }
+
+  if (update_data->day_number_widget != NULL &&
+      update_data->new_day_number != NULL) {
+    gtk_label_set_text(GTK_LABEL(update_data->day_number_widget),
+                       update_data->new_day_number);
+  }
+
+  // Free the update data
+  g_free(update_data->new_day);
+  g_free(update_data->new_month);
+  g_free(update_data->new_day_number);
   g_free(update_data);
 
   return G_SOURCE_REMOVE;
@@ -349,7 +405,179 @@ static gpointer weather_worker_thread(gpointer user_data) {
   return NULL;
 }
 
+// Date worker thread function: polls at interval and signals main thread on
+// change
+static gpointer date_worker_thread(gpointer user_data) {
+  DateData *ddata = (DateData *)user_data;
+
+  // Mark thread as running
+  g_mutex_lock(&ddata->mutex);
+  ddata->thread_running = TRUE;
+  g_mutex_unlock(&ddata->mutex);
+
+  // Helper function to get current date strings
+  // Initial update
+  time_t rawtime;
+  struct tm *timeinfo;
+  char day_name[32];
+  char month_name[32];
+  char day_number[8];
+
+  time(&rawtime);
+  timeinfo = localtime(&rawtime);
+  strftime(day_name, sizeof(day_name), "%A", timeinfo);
+  strftime(month_name, sizeof(month_name), "%B", timeinfo);
+  strftime(day_number, sizeof(day_number), "%d", timeinfo);
+
+  // Convert to uppercase
+  for (int i = 0; day_name[i]; i++) {
+    day_name[i] = g_ascii_toupper(day_name[i]);
+  }
+  for (int i = 0; month_name[i]; i++) {
+    month_name[i] = g_ascii_toupper(month_name[i]);
+  }
+
+  gchar *day = g_strdup(day_name);
+  gchar *month = g_strdup(month_name);
+  gchar *day_num = g_strdup(day_number);
+
+  if (day != NULL || month != NULL || day_num != NULL) {
+    g_mutex_lock(&ddata->mutex);
+    if (day != NULL)
+      ddata->previous_day = g_strdup(day);
+    if (month != NULL)
+      ddata->previous_month = g_strdup(month);
+    if (day_num != NULL)
+      ddata->previous_day_number = g_strdup(day_num);
+
+    GtkWidget *day_widget = ddata->day_widget;
+    GtkWidget *month_widget = ddata->month_widget;
+    GtkWidget *day_number_widget = ddata->day_number_widget;
+    g_mutex_unlock(&ddata->mutex);
+
+    DateUpdateData *update_data = g_malloc(sizeof(DateUpdateData));
+    update_data->day_widget = day_widget;
+    update_data->month_widget = month_widget;
+    update_data->day_number_widget = day_number_widget;
+    update_data->new_day = day ? g_strdup(day) : NULL;
+    update_data->new_month = month ? g_strdup(month) : NULL;
+    update_data->new_day_number = day_num ? g_strdup(day_num) : NULL;
+    g_idle_add(update_date_ui_from_main_thread, update_data);
+
+    g_free(day);
+    g_free(month);
+    g_free(day_num);
+  }
+
+  // Poll at date update interval
+  while (TRUE) {
+    g_mutex_lock(&ddata->mutex);
+
+    // Wait for interval or stop signal
+    gint64 end_time =
+        g_get_monotonic_time() + (DATE_UPDATE_INTERVAL * 1000); // microseconds
+
+    while (!ddata->should_stop) {
+      if (!g_cond_wait_until(&ddata->cond, &ddata->mutex, end_time)) {
+        break;
+      }
+      if (ddata->should_stop)
+        break;
+    }
+
+    if (ddata->should_stop) {
+      g_mutex_unlock(&ddata->mutex);
+      break;
+    }
+    g_mutex_unlock(&ddata->mutex);
+
+    // Get new date data
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(day_name, sizeof(day_name), "%A", timeinfo);
+    strftime(month_name, sizeof(month_name), "%B", timeinfo);
+    strftime(day_number, sizeof(day_number), "%d", timeinfo);
+
+    // Convert to uppercase
+    for (int i = 0; day_name[i]; i++) {
+      day_name[i] = g_ascii_toupper(day_name[i]);
+    }
+    for (int i = 0; month_name[i]; i++) {
+      month_name[i] = g_ascii_toupper(month_name[i]);
+    }
+
+    day = g_strdup(day_name);
+    month = g_strdup(month_name);
+    day_num = g_strdup(day_number);
+
+    if (day != NULL || month != NULL || day_num != NULL) {
+      g_mutex_lock(&ddata->mutex);
+
+      gboolean day_changed = FALSE;
+      gboolean month_changed = FALSE;
+      gboolean day_number_changed = FALSE;
+
+      if (day != NULL && (ddata->previous_day == NULL ||
+                          strcmp(ddata->previous_day, day) != 0)) {
+        day_changed = TRUE;
+        g_free(ddata->previous_day);
+        ddata->previous_day = g_strdup(day);
+      }
+
+      if (month != NULL && (ddata->previous_month == NULL ||
+                            strcmp(ddata->previous_month, month) != 0)) {
+        month_changed = TRUE;
+        g_free(ddata->previous_month);
+        ddata->previous_month = g_strdup(month);
+      }
+
+      if (day_num != NULL &&
+          (ddata->previous_day_number == NULL ||
+           strcmp(ddata->previous_day_number, day_num) != 0)) {
+        day_number_changed = TRUE;
+        g_free(ddata->previous_day_number);
+        ddata->previous_day_number = g_strdup(day_num);
+      }
+
+      if (day_changed || month_changed || day_number_changed) {
+        GtkWidget *day_widget = ddata->day_widget;
+        GtkWidget *month_widget = ddata->month_widget;
+        GtkWidget *day_number_widget = ddata->day_number_widget;
+
+        DateUpdateData *update_data = g_malloc(sizeof(DateUpdateData));
+        update_data->day_widget = day_widget;
+        update_data->month_widget = month_widget;
+        update_data->day_number_widget = day_number_widget;
+        update_data->new_day = day_changed && day ? g_strdup(day) : NULL;
+        update_data->new_month =
+            month_changed && month ? g_strdup(month) : NULL;
+        update_data->new_day_number =
+            day_number_changed && day_num ? g_strdup(day_num) : NULL;
+
+        g_mutex_unlock(&ddata->mutex);
+
+        g_idle_add(update_date_ui_from_main_thread, update_data);
+      } else {
+        g_mutex_unlock(&ddata->mutex);
+      }
+
+      g_free(day);
+      g_free(month);
+      g_free(day_num);
+    }
+  }
+
+  // Mark thread as no longer running
+  g_mutex_lock(&ddata->mutex);
+  ddata->thread_running = FALSE;
+  g_cond_signal(&ddata->cond);
+  g_mutex_unlock(&ddata->mutex);
+
+  return NULL;
+}
+
 // Cleanup function to free allocated resources
+// This function is idempotent and can be called multiple times safely
 static void cleanup_resources(void) {
   // Stop all worker threads and free resources
   if (bar_items_data != NULL) {
@@ -388,7 +616,7 @@ static void cleanup_resources(void) {
           timeout--;
         }
 
-        // Join the thread (should be quick now)
+        // Join the thread (should be quick now or already finished)
         g_thread_join(thread);
       }
 
@@ -436,23 +664,80 @@ static void cleanup_resources(void) {
         timeout--;
       }
 
+      // Join the thread (should be quick now or already finished)
       g_thread_join(thread);
     }
 
     // Clean up mutex and condition variable
+    // Always initialized if weather_data exists, even if thread creation failed
     g_cond_clear(&weather_data->cond);
     g_mutex_clear(&weather_data->mutex);
 
     // Free stored previous data
     if (weather_data->previous_emoji != NULL) {
       g_free(weather_data->previous_emoji);
+      weather_data->previous_emoji = NULL;
     }
     if (weather_data->previous_temp != NULL) {
       g_free(weather_data->previous_temp);
+      weather_data->previous_temp = NULL;
     }
 
     g_free(weather_data);
     weather_data = NULL;
+  }
+
+  // Cleanup date thread
+  if (date_data != NULL) {
+    g_mutex_lock(&date_data->mutex);
+    GThread *thread = date_data->thread;
+    if (thread != NULL) {
+      date_data->should_stop = TRUE;
+      g_cond_signal(&date_data->cond);
+      date_data->thread = NULL;
+    }
+    g_mutex_unlock(&date_data->mutex);
+
+    if (thread != NULL) {
+      // Wait for thread to finish with timeout
+      gint timeout = 50; // 50 * 100ms = 5 seconds
+      while (timeout > 0) {
+        g_mutex_lock(&date_data->mutex);
+        gboolean running = date_data->thread_running;
+        g_mutex_unlock(&date_data->mutex);
+
+        if (!running)
+          break;
+
+        g_usleep(100000); // 100ms
+        timeout--;
+      }
+
+      // Join the thread (should be quick now or already finished)
+      g_thread_join(thread);
+    }
+
+    // Clean up mutex and condition variable (always initialized if date_data
+    // exists)
+    g_cond_clear(&date_data->cond);
+    g_mutex_clear(&date_data->mutex);
+
+    // Free stored previous data
+    if (date_data->previous_day != NULL) {
+      g_free(date_data->previous_day);
+      date_data->previous_day = NULL;
+    }
+    if (date_data->previous_month != NULL) {
+      g_free(date_data->previous_month);
+      date_data->previous_month = NULL;
+    }
+    if (date_data->previous_day_number != NULL) {
+      g_free(date_data->previous_day_number);
+      date_data->previous_day_number = NULL;
+    }
+
+    g_free(date_data);
+    date_data = NULL;
   }
 }
 
@@ -608,28 +893,6 @@ static void create_menu_bar(GtkApplication *app) {
 }
 
 static void create_day_text(GtkApplication *app) {
-  // Get current date information
-  time_t rawtime;
-  struct tm *timeinfo;
-  char day_name[32];
-  char month_name[32];
-  char day_number[8];
-
-  time(&rawtime);
-  timeinfo = localtime(&rawtime);
-  strftime(day_name, sizeof(day_name), "%A", timeinfo);
-  strftime(month_name, sizeof(month_name), "%B", timeinfo);
-  strftime(day_number, sizeof(day_number), "%d", timeinfo);
-
-  // Convert day name to uppercase
-  for (int i = 0; day_name[i]; i++) {
-    day_name[i] = g_ascii_toupper(day_name[i]);
-  }
-
-  for (int i = 0; month_name[i]; i++) {
-    month_name[i] = g_ascii_toupper(month_name[i]);
-  }
-
   // Create day text window
   GtkWidget *day_window = gtk_application_window_new(app);
   gtk_layer_init_for_window(GTK_WINDOW(day_window));
@@ -678,13 +941,15 @@ static void create_day_text(GtkApplication *app) {
   gtk_widget_set_halign(month_day_box, GTK_ALIGN_START);
   gtk_widget_set_hexpand(month_day_box, FALSE);
 
-  // Create label for month name
-  GtkWidget *month_label = gtk_label_new(month_name);
+  // Create label for month name (initialize as empty, will be updated by
+  // thread)
+  GtkWidget *month_label = gtk_label_new("");
   gtk_widget_set_halign(month_label, GTK_ALIGN_START);
   gtk_widget_add_css_class(month_label, "month-text");
 
-  // Create label for day number
-  GtkWidget *day_number_label = gtk_label_new(day_number);
+  // Create label for day number (initialize as empty, will be updated by
+  // thread)
+  GtkWidget *day_number_label = gtk_label_new("");
   gtk_widget_set_halign(day_number_label, GTK_ALIGN_START);
   gtk_widget_add_css_class(day_number_label, "day-number-text");
 
@@ -693,8 +958,8 @@ static void create_day_text(GtkApplication *app) {
   gtk_box_append(GTK_BOX(month_day_box), day_number_label);
 
   // Create label for day name - text centered, but container left-aligned to
-  // match month+day
-  GtkWidget *day_label = gtk_label_new(day_name);
+  // match month+day (initialize as empty, will be updated by thread)
+  GtkWidget *day_label = gtk_label_new("");
   gtk_label_set_xalign(GTK_LABEL(day_label), 0.5); // Center text within label
   gtk_widget_set_halign(day_label, GTK_ALIGN_FILL);
   gtk_widget_set_hexpand(day_label, TRUE);
@@ -826,6 +1091,32 @@ static void create_day_text(GtkApplication *app) {
   // Append weather container to main vertical box
   gtk_box_append(GTK_BOX(vbox), weather_container);
 
+  // Initialize date data structure
+  date_data = g_malloc0(sizeof(DateData));
+  date_data->day_widget = day_label;
+  date_data->month_widget = month_label;
+  date_data->day_number_widget = day_number_label;
+  date_data->should_stop = FALSE;
+  date_data->thread_running = FALSE;
+  date_data->previous_day = NULL;
+  date_data->previous_month = NULL;
+  date_data->previous_day_number = NULL;
+  date_data->thread = NULL;
+  g_mutex_init(&date_data->mutex);
+  g_cond_init(&date_data->cond);
+
+  // Spawn date worker thread
+  GError *error = NULL;
+  date_data->thread =
+      g_thread_try_new("date-worker", date_worker_thread, date_data, &error);
+
+  if (date_data->thread == NULL) {
+    g_printerr("Failed to create date thread: %s\n",
+               error ? error->message : "Unknown error");
+    if (error)
+      g_error_free(error);
+  }
+
   // Initialize weather data structure
   weather_data = g_malloc0(sizeof(WeatherData));
   weather_data->emoji_widget = weather_emoji_label;
@@ -839,7 +1130,7 @@ static void create_day_text(GtkApplication *app) {
   g_cond_init(&weather_data->cond);
 
   // Spawn weather worker thread
-  GError *error = NULL;
+  error = NULL;
   weather_data->thread = g_thread_try_new(
       "weather-worker", weather_worker_thread, weather_data, &error);
 

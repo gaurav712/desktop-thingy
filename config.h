@@ -40,6 +40,7 @@
 #define DAY_NUMBER_TEXT_MARGIN_RIGHT 0
 #define DAY_NUMBER_TEXT_MARGIN_BOTTOM 0
 #define DAY_NUMBER_TEXT_MARGIN_LEFT 10
+#define DATE_UPDATE_INTERVAL 60000 // 1 minute in milliseconds
 
 // Weather text configuration
 #define WEATHER_EMOJI_FONT "Apple Color Emoji"
