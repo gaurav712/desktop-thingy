@@ -73,11 +73,7 @@ static const BarItem BAR_ITEMS[] = {
      "{for(i=1;i<=9;i++) {if(i==f) printf \"%s\", active; else if(arr[i]) "
      "printf \"%s\", has_windows; else printf \"%s\", empty}}'",
      500},
-    {"title=$(hyprctl activewindow 2>/dev/null | grep 'title:' | sed "
-     "'s/.*title: //' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); if [ "
-     "${#title} -gt 70 ]; then title=\"${title:0:70}...\"; fi; printf "
-     "\"$title\"",
-     500},
+    {"hyprctl activewindow 2>/dev/null | grep 'title:' | cut -f2- -d' '", 500},
     {"<separator>", 0},
     {"status", 500}};
 
