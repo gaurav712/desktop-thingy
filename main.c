@@ -246,10 +246,8 @@ static gpointer weather_worker_thread(gpointer user_data) {
   g_mutex_unlock(&wdata->mutex);
 
   // Initial update
-  gchar *emoji =
-      execute_command("curl -s wttr.in/ballia?format=3 | awk '{print $2}'");
-  gchar *temp = execute_command(
-      "curl -s wttr.in/ballia?format=3 | awk '{print $3}' | cut -d \"+\" -f2");
+  gchar *emoji = execute_command(WEATHER_EMOJI_COMMAND);
+  gchar *temp = execute_command(WEATHER_TEMP_COMMAND);
 
   if (emoji != NULL || temp != NULL) {
     g_mutex_lock(&wdata->mutex);
@@ -296,10 +294,8 @@ static gpointer weather_worker_thread(gpointer user_data) {
     g_mutex_unlock(&wdata->mutex);
 
     // Execute commands to get new weather data
-    emoji =
-        execute_command("curl -s wttr.in/ballia?format=3 | awk '{print $2}'");
-    temp = execute_command("curl -s wttr.in/ballia?format=3 | awk '{print $3}' "
-                           "| cut -d \"+\" -f2");
+    emoji = execute_command(WEATHER_EMOJI_COMMAND);
+    temp = execute_command(WEATHER_TEMP_COMMAND);
 
     if (emoji != NULL || temp != NULL) {
       g_mutex_lock(&wdata->mutex);

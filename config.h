@@ -57,6 +57,10 @@
 #define WEATHER_TEMP_MARGIN_BOTTOM 0
 #define WEATHER_TEMP_MARGIN_LEFT 5
 #define WEATHER_UPDATE_INTERVAL 300000 // 5 minutes in milliseconds
+#define WEATHER_EMOJI_COMMAND                                                  \
+  "curl -s wttr.in/ballia?format=3 | awk '{print $2}'"
+#define WEATHER_TEMP_COMMAND                                                   \
+  "curl -s wttr.in/ballia?format=3 | awk '{print $3}' | cut -d \"+\" -f2"
 
 // Bar items configuration
 typedef struct {
