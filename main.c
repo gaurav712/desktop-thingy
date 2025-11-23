@@ -183,8 +183,9 @@ static gpointer module_worker_thread(gpointer user_data) {
     // Normalize blank output: treat NULL and empty string as blank
     // Convert NULL to empty string for comparison
     const char *current_output = (output == NULL) ? "" : output;
-    const char *previous_output = (item_data->previous_output == NULL) ? "" : item_data->previous_output;
-    
+    const char *previous_output =
+        (item_data->previous_output == NULL) ? "" : item_data->previous_output;
+
     gboolean current_is_blank = (strlen(current_output) == 0);
     gboolean previous_is_blank = (strlen(previous_output) == 0);
 
@@ -528,9 +529,6 @@ static void create_menu_bar(GtkApplication *app) {
       "  padding-top: 0px;"
       "  padding-bottom: 0px;"
       "  min-height: %dpx;"
-      "  max-height: %dpx;"
-      "  height: %dpx;"
-      "  overflow: hidden;"
       "  font-family: %s;"
       "  font-size: %dpt;"
       "}"
@@ -542,7 +540,7 @@ static void create_menu_bar(GtkApplication *app) {
       "}",
       bg_r, bg_g, bg_b, BAR_BACKGROUND_OPACITY, BAR_BORDER_WIDTH, border_r,
       border_g, border_b, BAR_BACKGROUND_OPACITY, BAR_BORDER_RADIUS, BAR_HEIGHT,
-      BAR_HEIGHT, BAR_HEIGHT, BAR_FONT, BAR_TEXT_SIZE, BAR_FONT, BAR_TEXT_SIZE);
+      BAR_FONT, BAR_TEXT_SIZE, BAR_FONT, BAR_TEXT_SIZE);
 
   gtk_css_provider_load_from_string(css_provider, css);
   gtk_style_context_add_provider_for_display(
