@@ -130,23 +130,23 @@ static gpointer module_worker_thread(gpointer user_data) {
 
   // Initial update
   gchar *output = execute_command(item_data->command);
+  g_mutex_lock(&item_data->mutex);
+  item_data->previous_output = output ? g_strdup(output) : g_strdup("");
+  g_mutex_unlock(&item_data->mutex);
+
+  // Signal main thread to update UI (always update on initial run)
+  // Read widget pointer with mutex protection (though it's set during init
+  // and never modified)
+  g_mutex_lock(&item_data->mutex);
+  GtkWidget *widget = item_data->widget;
+  g_mutex_unlock(&item_data->mutex);
+
+  UpdateData *update_data = g_malloc(sizeof(UpdateData));
+  update_data->widget = widget;
+  update_data->new_output = output ? g_strdup(output) : g_strdup("");
+  g_idle_add(update_ui_from_main_thread, update_data);
+
   if (output != NULL) {
-    g_mutex_lock(&item_data->mutex);
-    item_data->previous_output = g_strdup(output);
-    g_mutex_unlock(&item_data->mutex);
-
-    // Signal main thread to update UI
-    // Read widget pointer with mutex protection (though it's set during init
-    // and never modified)
-    g_mutex_lock(&item_data->mutex);
-    GtkWidget *widget = item_data->widget;
-    g_mutex_unlock(&item_data->mutex);
-
-    UpdateData *update_data = g_malloc(sizeof(UpdateData));
-    update_data->widget = widget;
-    update_data->new_output = g_strdup(output);
-    g_idle_add(update_ui_from_main_thread, update_data);
-
     g_free(output);
   }
 
@@ -178,32 +178,49 @@ static gpointer module_worker_thread(gpointer user_data) {
     // Execute command to get new output
     output = execute_command(item_data->command);
 
+    g_mutex_lock(&item_data->mutex);
+
+    // Normalize blank output: treat NULL and empty string as blank
+    // Convert NULL to empty string for comparison
+    const char *current_output = (output == NULL) ? "" : output;
+    const char *previous_output = (item_data->previous_output == NULL) ? "" : item_data->previous_output;
+    
+    gboolean current_is_blank = (strlen(current_output) == 0);
+    gboolean previous_is_blank = (strlen(previous_output) == 0);
+
+    // Compare with previous output - signal if changed
+    // Skip update only if both are blank (no change from blank to blank)
+    gboolean should_update = FALSE;
+    if (current_is_blank && previous_is_blank) {
+      // Both blank - no change, skip update
+      should_update = FALSE;
+    } else {
+      // At least one is not blank - compare strings
+      should_update = (strcmp(previous_output, current_output) != 0);
+    }
+
+    if (should_update) {
+      // Data changed - signal main thread to update UI
+      // Read widget pointer while holding mutex
+      GtkWidget *widget = item_data->widget;
+
+      UpdateData *update_data = g_malloc(sizeof(UpdateData));
+      update_data->widget = widget;
+      update_data->new_output = output ? g_strdup(output) : g_strdup("");
+
+      // Update stored previous output
+      g_free(item_data->previous_output);
+      item_data->previous_output = output ? g_strdup(output) : g_strdup("");
+
+      g_mutex_unlock(&item_data->mutex);
+
+      // Queue update to main thread
+      g_idle_add(update_ui_from_main_thread, update_data);
+    } else {
+      g_mutex_unlock(&item_data->mutex);
+    }
+
     if (output != NULL) {
-      g_mutex_lock(&item_data->mutex);
-
-      // Compare with previous output - only signal if changed
-      if (item_data->previous_output == NULL ||
-          strcmp(item_data->previous_output, output) != 0) {
-        // Data changed - signal main thread to update UI
-        // Read widget pointer while holding mutex
-        GtkWidget *widget = item_data->widget;
-
-        UpdateData *update_data = g_malloc(sizeof(UpdateData));
-        update_data->widget = widget;
-        update_data->new_output = g_strdup(output);
-
-        // Update stored previous output
-        g_free(item_data->previous_output);
-        item_data->previous_output = g_strdup(output);
-
-        g_mutex_unlock(&item_data->mutex);
-
-        // Queue update to main thread
-        g_idle_add(update_ui_from_main_thread, update_data);
-      } else {
-        g_mutex_unlock(&item_data->mutex);
-      }
-
       g_free(output);
     }
   }
