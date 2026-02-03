@@ -83,7 +83,7 @@ static const BarItem BAR_ITEMS[] = {
      "printf \"$title\"",
      500},
     {"<separator>", 0},
-    {"status", 500}};
+    {"status", 1000}};
 
 #define BAR_ITEMS_COUNT (sizeof(BAR_ITEMS) / sizeof(BAR_ITEMS[0]))
 
