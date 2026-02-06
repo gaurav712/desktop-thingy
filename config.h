@@ -70,8 +70,8 @@ typedef struct {
 } BarItem;
 
 // Define the items array
-static const BarItem BAR_ITEMS[] = {{"mango-tags", 300},
-                                    {"mango-window-title", 300},
+static const BarItem BAR_ITEMS[] = {{"hyprland-workspaces", 300},
+                                    {"hyprland-window-title", 300},
                                     {"<separator>", 0},
                                     {"status", 500}};
 
