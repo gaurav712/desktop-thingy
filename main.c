@@ -7,50 +7,43 @@
 #include <time.h>
 #include <unistd.h>
 
-// Structure to hold update data for main thread
+// Structure to hold bar item update data for main thread
 typedef struct {
-  GtkWidget *widget;
+  int item_index;
   gchar *new_output;
 } UpdateData;
 
 // Structure to hold weather update data for main thread
 typedef struct {
-  GtkWidget *emoji_widget;
-  GtkWidget *temp_widget;
   gchar *new_emoji;
   gchar *new_temp;
 } WeatherUpdateData;
 
 // Structure to hold date update data for main thread
 typedef struct {
-  GtkWidget *day_widget;
-  GtkWidget *month_widget;
-  GtkWidget *day_number_widget;
   gchar *new_day;
   gchar *new_month;
   gchar *new_day_number;
 } DateUpdateData;
 
-// Structure to hold item widget and update info
+// Structure to hold bar item worker state (identified by index, no widget ptr)
 typedef struct {
-  GtkWidget *widget;
+  int item_index;
   const char *command;
   int interval;
-  GThread *thread;         // Worker thread for this module
-  gboolean should_stop;    // Flag to stop the thread
-  gboolean thread_running; // Flag to track if thread is active
-  GMutex mutex;            // Mutex for thread-safe access
-  GCond cond;              // Condition variable for interruptible sleep
-  gchar *previous_output;  // Previous output for change detection
+  GThread *thread;
+  gboolean should_stop;
+  gboolean thread_running;
+  GMutex mutex;
+  GCond cond;
+  gchar *previous_output;
 } BarItemData;
 
 static gchar *background_image_path = NULL;
 static BarItemData *bar_items_data = NULL;
 
-// Structure to hold weather widget and update info
+// Structure to hold weather worker state
 typedef struct {
-  GtkWidget *emoji_widget;
-  GtkWidget *temp_widget;
   GThread *thread;
   gboolean should_stop;
   gboolean thread_running;
@@ -62,11 +55,8 @@ typedef struct {
 
 static WeatherData *weather_data = NULL;
 
-// Structure to hold date widget and update info
+// Structure to hold date worker state
 typedef struct {
-  GtkWidget *day_widget;
-  GtkWidget *month_widget;
-  GtkWidget *day_number_widget;
   GThread *thread;
   gboolean should_stop;
   gboolean thread_running;
@@ -78,6 +68,21 @@ typedef struct {
 } DateData;
 
 static DateData *date_data = NULL;
+
+// Per-monitor widget state
+typedef struct {
+  GdkMonitor *monitor;
+  GtkWidget  *bg_window;
+  GtkWidget  *day_window;
+  GtkWidget  *bar_window;
+  GtkWidget  *day_label, *month_label, *day_number_label;
+  GtkWidget  *weather_emoji_label, *weather_temp_label;
+  GtkWidget **bar_item_widgets; // g_malloc0'd, length BAR_ITEMS_COUNT
+} MonitorData;
+
+static GList   *g_monitors = NULL;
+static GMutex   g_monitors_mutex;
+static gboolean g_monitors_mutex_initialized = FALSE;
 
 // Execute command and return output
 static gchar *execute_command(const char *command) {
@@ -107,79 +112,78 @@ static gchar *execute_command(const char *command) {
   return output;
 }
 
-// Idle callback to update UI from main thread (called when worker thread
-// signals)
+// Idle callback: update bar item label on all monitors
 static gboolean update_ui_from_main_thread(gpointer user_data) {
-  UpdateData *update_data = (UpdateData *)user_data;
+  UpdateData *ud = (UpdateData *)user_data;
 
-  if (update_data->widget != NULL && update_data->new_output != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->widget), update_data->new_output);
+  g_mutex_lock(&g_monitors_mutex);
+  for (GList *l = g_monitors; l; l = l->next) {
+    MonitorData *md = l->data;
+    if (md->bar_item_widgets != NULL &&
+        md->bar_item_widgets[ud->item_index] != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->bar_item_widgets[ud->item_index]),
+                         ud->new_output);
+    }
   }
+  g_mutex_unlock(&g_monitors_mutex);
 
-  // Free the update data
-  g_free(update_data->new_output);
-  g_free(update_data);
-
-  return G_SOURCE_REMOVE; // Remove the idle source after execution
+  g_free(ud->new_output);
+  g_free(ud);
+  return G_SOURCE_REMOVE;
 }
 
-// Idle callback to update weather UI from main thread
+// Idle callback: update weather labels on all monitors
 static gboolean update_weather_ui_from_main_thread(gpointer user_data) {
-  WeatherUpdateData *update_data = (WeatherUpdateData *)user_data;
+  WeatherUpdateData *ud = (WeatherUpdateData *)user_data;
 
-  if (update_data->emoji_widget != NULL && update_data->new_emoji != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->emoji_widget),
-                       update_data->new_emoji);
+  g_mutex_lock(&g_monitors_mutex);
+  for (GList *l = g_monitors; l; l = l->next) {
+    MonitorData *md = l->data;
+    if (ud->new_emoji != NULL && md->weather_emoji_label != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->weather_emoji_label), ud->new_emoji);
+    }
+    if (ud->new_temp != NULL && md->weather_temp_label != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->weather_temp_label), ud->new_temp);
+    }
   }
+  g_mutex_unlock(&g_monitors_mutex);
 
-  if (update_data->temp_widget != NULL && update_data->new_temp != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->temp_widget),
-                       update_data->new_temp);
-  }
-
-  // Free the update data
-  g_free(update_data->new_emoji);
-  g_free(update_data->new_temp);
-  g_free(update_data);
-
+  g_free(ud->new_emoji);
+  g_free(ud->new_temp);
+  g_free(ud);
   return G_SOURCE_REMOVE;
 }
 
-// Idle callback to update date UI from main thread
+// Idle callback: update date labels on all monitors
 static gboolean update_date_ui_from_main_thread(gpointer user_data) {
-  DateUpdateData *update_data = (DateUpdateData *)user_data;
+  DateUpdateData *ud = (DateUpdateData *)user_data;
 
-  if (update_data->day_widget != NULL && update_data->new_day != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->day_widget),
-                       update_data->new_day);
+  g_mutex_lock(&g_monitors_mutex);
+  for (GList *l = g_monitors; l; l = l->next) {
+    MonitorData *md = l->data;
+    if (ud->new_day != NULL && md->day_label != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->day_label), ud->new_day);
+    }
+    if (ud->new_month != NULL && md->month_label != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->month_label), ud->new_month);
+    }
+    if (ud->new_day_number != NULL && md->day_number_label != NULL) {
+      gtk_label_set_text(GTK_LABEL(md->day_number_label), ud->new_day_number);
+    }
   }
+  g_mutex_unlock(&g_monitors_mutex);
 
-  if (update_data->month_widget != NULL && update_data->new_month != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->month_widget),
-                       update_data->new_month);
-  }
-
-  if (update_data->day_number_widget != NULL &&
-      update_data->new_day_number != NULL) {
-    gtk_label_set_text(GTK_LABEL(update_data->day_number_widget),
-                       update_data->new_day_number);
-  }
-
-  // Free the update data
-  g_free(update_data->new_day);
-  g_free(update_data->new_month);
-  g_free(update_data->new_day_number);
-  g_free(update_data);
-
+  g_free(ud->new_day);
+  g_free(ud->new_month);
+  g_free(ud->new_day_number);
+  g_free(ud);
   return G_SOURCE_REMOVE;
 }
 
-// Worker thread function: polls at module interval and signals main thread on
-// change
+// Worker thread: polls at interval, queues label updates to all monitors on change
 static gpointer module_worker_thread(gpointer user_data) {
   BarItemData *item_data = (BarItemData *)user_data;
 
-  // Mark thread as running
   g_mutex_lock(&item_data->mutex);
   item_data->thread_running = TRUE;
   g_mutex_unlock(&item_data->mutex);
@@ -190,37 +194,24 @@ static gpointer module_worker_thread(gpointer user_data) {
   item_data->previous_output = output ? g_strdup(output) : g_strdup("");
   g_mutex_unlock(&item_data->mutex);
 
-  // Signal main thread to update UI (always update on initial run)
-  // Read widget pointer with mutex protection (though it's set during init
-  // and never modified)
-  g_mutex_lock(&item_data->mutex);
-  GtkWidget *widget = item_data->widget;
-  g_mutex_unlock(&item_data->mutex);
-
   UpdateData *update_data = g_malloc(sizeof(UpdateData));
-  update_data->widget = widget;
+  update_data->item_index = item_data->item_index;
   update_data->new_output = output ? g_strdup(output) : g_strdup("");
   g_idle_add(update_ui_from_main_thread, update_data);
 
-  if (output != NULL) {
+  if (output != NULL)
     g_free(output);
-  }
 
   // Poll at module's interval
   while (TRUE) {
     g_mutex_lock(&item_data->mutex);
 
-    // Wait for interval or stop signal (interruptible sleep)
     gint64 end_time =
-        g_get_monotonic_time() + (item_data->interval * 1000); // microseconds
+        g_get_monotonic_time() + (item_data->interval * 1000);
 
-    // Wait with timeout - will wake up on cond signal or timeout
     while (!item_data->should_stop) {
-      if (!g_cond_wait_until(&item_data->cond, &item_data->mutex, end_time)) {
-        // Timeout occurred - break to execute command
+      if (!g_cond_wait_until(&item_data->cond, &item_data->mutex, end_time))
         break;
-      }
-      // If woken by signal and should_stop is true, break
       if (item_data->should_stop)
         break;
     }
@@ -231,13 +222,10 @@ static gpointer module_worker_thread(gpointer user_data) {
     }
     g_mutex_unlock(&item_data->mutex);
 
-    // Execute command to get new output
     output = execute_command(item_data->command);
 
     g_mutex_lock(&item_data->mutex);
 
-    // Normalize blank output: treat NULL and empty string as blank
-    // Convert NULL to empty string for comparison
     const char *current_output = (output == NULL) ? "" : output;
     const char *previous_output =
         (item_data->previous_output == NULL) ? "" : item_data->previous_output;
@@ -245,58 +233,43 @@ static gpointer module_worker_thread(gpointer user_data) {
     gboolean current_is_blank = (strlen(current_output) == 0);
     gboolean previous_is_blank = (strlen(previous_output) == 0);
 
-    // Compare with previous output - signal if changed
-    // Skip update only if both are blank (no change from blank to blank)
     gboolean should_update = FALSE;
     if (current_is_blank && previous_is_blank) {
-      // Both blank - no change, skip update
       should_update = FALSE;
     } else {
-      // At least one is not blank - compare strings
       should_update = (strcmp(previous_output, current_output) != 0);
     }
 
     if (should_update) {
-      // Data changed - signal main thread to update UI
-      // Read widget pointer while holding mutex
-      GtkWidget *widget = item_data->widget;
+      UpdateData *ud = g_malloc(sizeof(UpdateData));
+      ud->item_index = item_data->item_index;
+      ud->new_output = output ? g_strdup(output) : g_strdup("");
 
-      UpdateData *update_data = g_malloc(sizeof(UpdateData));
-      update_data->widget = widget;
-      update_data->new_output = output ? g_strdup(output) : g_strdup("");
-
-      // Update stored previous output
       g_free(item_data->previous_output);
       item_data->previous_output = output ? g_strdup(output) : g_strdup("");
 
       g_mutex_unlock(&item_data->mutex);
-
-      // Queue update to main thread
-      g_idle_add(update_ui_from_main_thread, update_data);
+      g_idle_add(update_ui_from_main_thread, ud);
     } else {
       g_mutex_unlock(&item_data->mutex);
     }
 
-    if (output != NULL) {
+    if (output != NULL)
       g_free(output);
-    }
   }
 
-  // Mark thread as no longer running
   g_mutex_lock(&item_data->mutex);
   item_data->thread_running = FALSE;
-  g_cond_signal(&item_data->cond); // Signal in case cleanup is waiting
+  g_cond_signal(&item_data->cond);
   g_mutex_unlock(&item_data->mutex);
 
   return NULL;
 }
 
-// Weather worker thread function: polls at interval and signals main thread on
-// change
+// Weather worker thread
 static gpointer weather_worker_thread(gpointer user_data) {
   WeatherData *wdata = (WeatherData *)user_data;
 
-  // Mark thread as running
   g_mutex_lock(&wdata->mutex);
   wdata->thread_running = TRUE;
   g_mutex_unlock(&wdata->mutex);
@@ -311,34 +284,26 @@ static gpointer weather_worker_thread(gpointer user_data) {
       wdata->previous_emoji = g_strdup(emoji);
     if (temp != NULL)
       wdata->previous_temp = g_strdup(temp);
-
-    GtkWidget *emoji_widget = wdata->emoji_widget;
-    GtkWidget *temp_widget = wdata->temp_widget;
     g_mutex_unlock(&wdata->mutex);
 
-    WeatherUpdateData *update_data = g_malloc(sizeof(WeatherUpdateData));
-    update_data->emoji_widget = emoji_widget;
-    update_data->temp_widget = temp_widget;
-    update_data->new_emoji = emoji ? g_strdup(emoji) : NULL;
-    update_data->new_temp = temp ? g_strdup(temp) : NULL;
-    g_idle_add(update_weather_ui_from_main_thread, update_data);
+    WeatherUpdateData *ud = g_malloc(sizeof(WeatherUpdateData));
+    ud->new_emoji = emoji ? g_strdup(emoji) : NULL;
+    ud->new_temp = temp ? g_strdup(temp) : NULL;
+    g_idle_add(update_weather_ui_from_main_thread, ud);
 
     g_free(emoji);
     g_free(temp);
   }
 
-  // Poll at weather update interval
   while (TRUE) {
     g_mutex_lock(&wdata->mutex);
 
-    // Wait for interval or stop signal
-    gint64 end_time = g_get_monotonic_time() +
-                      (WEATHER_UPDATE_INTERVAL * 1000); // microseconds
+    gint64 end_time =
+        g_get_monotonic_time() + (WEATHER_UPDATE_INTERVAL * 1000);
 
     while (!wdata->should_stop) {
-      if (!g_cond_wait_until(&wdata->cond, &wdata->mutex, end_time)) {
+      if (!g_cond_wait_until(&wdata->cond, &wdata->mutex, end_time))
         break;
-      }
       if (wdata->should_stop)
         break;
     }
@@ -349,7 +314,6 @@ static gpointer weather_worker_thread(gpointer user_data) {
     }
     g_mutex_unlock(&wdata->mutex);
 
-    // Execute commands to get new weather data
     emoji = execute_command(WEATHER_EMOJI_COMMAND);
     temp = execute_command(WEATHER_TEMP_COMMAND);
 
@@ -374,19 +338,11 @@ static gpointer weather_worker_thread(gpointer user_data) {
       }
 
       if (emoji_changed || temp_changed) {
-        GtkWidget *emoji_widget = wdata->emoji_widget;
-        GtkWidget *temp_widget = wdata->temp_widget;
-
-        WeatherUpdateData *update_data = g_malloc(sizeof(WeatherUpdateData));
-        update_data->emoji_widget = emoji_widget;
-        update_data->temp_widget = temp_widget;
-        update_data->new_emoji =
-            emoji_changed && emoji ? g_strdup(emoji) : NULL;
-        update_data->new_temp = temp_changed && temp ? g_strdup(temp) : NULL;
-
+        WeatherUpdateData *ud = g_malloc(sizeof(WeatherUpdateData));
+        ud->new_emoji = emoji_changed && emoji ? g_strdup(emoji) : NULL;
+        ud->new_temp = temp_changed && temp ? g_strdup(temp) : NULL;
         g_mutex_unlock(&wdata->mutex);
-
-        g_idle_add(update_weather_ui_from_main_thread, update_data);
+        g_idle_add(update_weather_ui_from_main_thread, ud);
       } else {
         g_mutex_unlock(&wdata->mutex);
       }
@@ -396,7 +352,6 @@ static gpointer weather_worker_thread(gpointer user_data) {
     }
   }
 
-  // Mark thread as no longer running
   g_mutex_lock(&wdata->mutex);
   wdata->thread_running = FALSE;
   g_cond_signal(&wdata->cond);
@@ -405,18 +360,14 @@ static gpointer weather_worker_thread(gpointer user_data) {
   return NULL;
 }
 
-// Date worker thread function: polls at interval and signals main thread on
-// change
+// Date worker thread
 static gpointer date_worker_thread(gpointer user_data) {
   DateData *ddata = (DateData *)user_data;
 
-  // Mark thread as running
   g_mutex_lock(&ddata->mutex);
   ddata->thread_running = TRUE;
   g_mutex_unlock(&ddata->mutex);
 
-  // Helper function to get current date strings
-  // Initial update
   time_t rawtime;
   struct tm *timeinfo;
   char day_name[32];
@@ -429,13 +380,10 @@ static gpointer date_worker_thread(gpointer user_data) {
   strftime(month_name, sizeof(month_name), "%B", timeinfo);
   strftime(day_number, sizeof(day_number), "%d", timeinfo);
 
-  // Convert to uppercase
-  for (int i = 0; day_name[i]; i++) {
+  for (int i = 0; day_name[i]; i++)
     day_name[i] = g_ascii_toupper(day_name[i]);
-  }
-  for (int i = 0; month_name[i]; i++) {
+  for (int i = 0; month_name[i]; i++)
     month_name[i] = g_ascii_toupper(month_name[i]);
-  }
 
   gchar *day = g_strdup(day_name);
   gchar *month = g_strdup(month_name);
@@ -449,38 +397,28 @@ static gpointer date_worker_thread(gpointer user_data) {
       ddata->previous_month = g_strdup(month);
     if (day_num != NULL)
       ddata->previous_day_number = g_strdup(day_num);
-
-    GtkWidget *day_widget = ddata->day_widget;
-    GtkWidget *month_widget = ddata->month_widget;
-    GtkWidget *day_number_widget = ddata->day_number_widget;
     g_mutex_unlock(&ddata->mutex);
 
-    DateUpdateData *update_data = g_malloc(sizeof(DateUpdateData));
-    update_data->day_widget = day_widget;
-    update_data->month_widget = month_widget;
-    update_data->day_number_widget = day_number_widget;
-    update_data->new_day = day ? g_strdup(day) : NULL;
-    update_data->new_month = month ? g_strdup(month) : NULL;
-    update_data->new_day_number = day_num ? g_strdup(day_num) : NULL;
-    g_idle_add(update_date_ui_from_main_thread, update_data);
+    DateUpdateData *ud = g_malloc(sizeof(DateUpdateData));
+    ud->new_day = day ? g_strdup(day) : NULL;
+    ud->new_month = month ? g_strdup(month) : NULL;
+    ud->new_day_number = day_num ? g_strdup(day_num) : NULL;
+    g_idle_add(update_date_ui_from_main_thread, ud);
 
     g_free(day);
     g_free(month);
     g_free(day_num);
   }
 
-  // Poll at date update interval
   while (TRUE) {
     g_mutex_lock(&ddata->mutex);
 
-    // Wait for interval or stop signal
     gint64 end_time =
-        g_get_monotonic_time() + (DATE_UPDATE_INTERVAL * 1000); // microseconds
+        g_get_monotonic_time() + (DATE_UPDATE_INTERVAL * 1000);
 
     while (!ddata->should_stop) {
-      if (!g_cond_wait_until(&ddata->cond, &ddata->mutex, end_time)) {
+      if (!g_cond_wait_until(&ddata->cond, &ddata->mutex, end_time))
         break;
-      }
       if (ddata->should_stop)
         break;
     }
@@ -491,20 +429,16 @@ static gpointer date_worker_thread(gpointer user_data) {
     }
     g_mutex_unlock(&ddata->mutex);
 
-    // Get new date data
     time(&rawtime);
     timeinfo = localtime(&rawtime);
     strftime(day_name, sizeof(day_name), "%A", timeinfo);
     strftime(month_name, sizeof(month_name), "%B", timeinfo);
     strftime(day_number, sizeof(day_number), "%d", timeinfo);
 
-    // Convert to uppercase
-    for (int i = 0; day_name[i]; i++) {
+    for (int i = 0; day_name[i]; i++)
       day_name[i] = g_ascii_toupper(day_name[i]);
-    }
-    for (int i = 0; month_name[i]; i++) {
+    for (int i = 0; month_name[i]; i++)
       month_name[i] = g_ascii_toupper(month_name[i]);
-    }
 
     day = g_strdup(day_name);
     month = g_strdup(month_name);
@@ -540,23 +474,13 @@ static gpointer date_worker_thread(gpointer user_data) {
       }
 
       if (day_changed || month_changed || day_number_changed) {
-        GtkWidget *day_widget = ddata->day_widget;
-        GtkWidget *month_widget = ddata->month_widget;
-        GtkWidget *day_number_widget = ddata->day_number_widget;
-
-        DateUpdateData *update_data = g_malloc(sizeof(DateUpdateData));
-        update_data->day_widget = day_widget;
-        update_data->month_widget = month_widget;
-        update_data->day_number_widget = day_number_widget;
-        update_data->new_day = day_changed && day ? g_strdup(day) : NULL;
-        update_data->new_month =
-            month_changed && month ? g_strdup(month) : NULL;
-        update_data->new_day_number =
+        DateUpdateData *ud = g_malloc(sizeof(DateUpdateData));
+        ud->new_day = day_changed && day ? g_strdup(day) : NULL;
+        ud->new_month = month_changed && month ? g_strdup(month) : NULL;
+        ud->new_day_number =
             day_number_changed && day_num ? g_strdup(day_num) : NULL;
-
         g_mutex_unlock(&ddata->mutex);
-
-        g_idle_add(update_date_ui_from_main_thread, update_data);
+        g_idle_add(update_date_ui_from_main_thread, ud);
       } else {
         g_mutex_unlock(&ddata->mutex);
       }
@@ -567,7 +491,6 @@ static gpointer date_worker_thread(gpointer user_data) {
     }
   }
 
-  // Mark thread as no longer running
   g_mutex_lock(&ddata->mutex);
   ddata->thread_running = FALSE;
   g_cond_signal(&ddata->cond);
@@ -576,228 +499,16 @@ static gpointer date_worker_thread(gpointer user_data) {
   return NULL;
 }
 
-// Cleanup function to free allocated resources
-// This function is idempotent and can be called multiple times safely
-static void cleanup_resources(void) {
-  // Stop all worker threads and free resources
-  if (bar_items_data != NULL) {
-    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
-      BarItemData *item_data = &bar_items_data[i];
-
-      // Signal thread to stop
-      // Read thread pointer with mutex protection to avoid race condition
-      g_mutex_lock(&item_data->mutex);
-      GThread *thread = item_data->thread;
-      if (thread != NULL) {
-        item_data->should_stop = TRUE;
-        // Wake up thread if it's sleeping
-        g_cond_signal(&item_data->cond);
-        // Clear thread reference while holding mutex
-        item_data->thread = NULL;
-      }
-      g_mutex_unlock(&item_data->mutex);
-
-      if (thread != NULL) {
-        // Wait for thread to finish with timeout (5 seconds)
-
-        // Try to join with a reasonable timeout
-        // Note: g_thread_join doesn't have timeout, so we use a workaround
-        // by checking thread_running flag
-        gint timeout = 50; // 50 * 100ms = 5 seconds
-        while (timeout > 0) {
-          g_mutex_lock(&item_data->mutex);
-          gboolean running = item_data->thread_running;
-          g_mutex_unlock(&item_data->mutex);
-
-          if (!running)
-            break;
-
-          g_usleep(100000); // 100ms
-          timeout--;
-        }
-
-        // Join the thread (should be quick now or already finished)
-        g_thread_join(thread);
-      }
-
-      // Clean up mutex and condition variable
-      // Only clear if thread was actually created (mutex/cond were initialized)
-      if (item_data->command != NULL &&
-          strcmp(item_data->command, "<separator>") != 0) {
-        g_cond_clear(&item_data->cond);
-        g_mutex_clear(&item_data->mutex);
-
-        // Free stored previous output
-        if (item_data->previous_output != NULL) {
-          g_free(item_data->previous_output);
-          item_data->previous_output = NULL;
-        }
-      }
-    }
-    g_free(bar_items_data);
-    bar_items_data = NULL;
-  }
-
-  // Cleanup weather thread
-  if (weather_data != NULL) {
-    g_mutex_lock(&weather_data->mutex);
-    GThread *thread = weather_data->thread;
-    if (thread != NULL) {
-      weather_data->should_stop = TRUE;
-      g_cond_signal(&weather_data->cond);
-      weather_data->thread = NULL;
-    }
-    g_mutex_unlock(&weather_data->mutex);
-
-    if (thread != NULL) {
-      // Wait for thread to finish with timeout
-      gint timeout = 50; // 50 * 100ms = 5 seconds
-      while (timeout > 0) {
-        g_mutex_lock(&weather_data->mutex);
-        gboolean running = weather_data->thread_running;
-        g_mutex_unlock(&weather_data->mutex);
-
-        if (!running)
-          break;
-
-        g_usleep(100000); // 100ms
-        timeout--;
-      }
-
-      // Join the thread (should be quick now or already finished)
-      g_thread_join(thread);
-    }
-
-    // Clean up mutex and condition variable
-    // Always initialized if weather_data exists, even if thread creation failed
-    g_cond_clear(&weather_data->cond);
-    g_mutex_clear(&weather_data->mutex);
-
-    // Free stored previous data
-    if (weather_data->previous_emoji != NULL) {
-      g_free(weather_data->previous_emoji);
-      weather_data->previous_emoji = NULL;
-    }
-    if (weather_data->previous_temp != NULL) {
-      g_free(weather_data->previous_temp);
-      weather_data->previous_temp = NULL;
-    }
-
-    g_free(weather_data);
-    weather_data = NULL;
-  }
-
-  // Cleanup date thread
-  if (date_data != NULL) {
-    g_mutex_lock(&date_data->mutex);
-    GThread *thread = date_data->thread;
-    if (thread != NULL) {
-      date_data->should_stop = TRUE;
-      g_cond_signal(&date_data->cond);
-      date_data->thread = NULL;
-    }
-    g_mutex_unlock(&date_data->mutex);
-
-    if (thread != NULL) {
-      // Wait for thread to finish with timeout
-      gint timeout = 50; // 50 * 100ms = 5 seconds
-      while (timeout > 0) {
-        g_mutex_lock(&date_data->mutex);
-        gboolean running = date_data->thread_running;
-        g_mutex_unlock(&date_data->mutex);
-
-        if (!running)
-          break;
-
-        g_usleep(100000); // 100ms
-        timeout--;
-      }
-
-      // Join the thread (should be quick now or already finished)
-      g_thread_join(thread);
-    }
-
-    // Clean up mutex and condition variable (always initialized if date_data
-    // exists)
-    g_cond_clear(&date_data->cond);
-    g_mutex_clear(&date_data->mutex);
-
-    // Free stored previous data
-    if (date_data->previous_day != NULL) {
-      g_free(date_data->previous_day);
-      date_data->previous_day = NULL;
-    }
-    if (date_data->previous_month != NULL) {
-      g_free(date_data->previous_month);
-      date_data->previous_month = NULL;
-    }
-    if (date_data->previous_day_number != NULL) {
-      g_free(date_data->previous_day_number);
-      date_data->previous_day_number = NULL;
-    }
-
-    g_free(date_data);
-    date_data = NULL;
-  }
-}
-
-static void create_menu_bar(GtkApplication *app) {
-  GtkWidget *menu_window = gtk_application_window_new(app);
-  gtk_layer_init_for_window(GTK_WINDOW(menu_window));
-  gtk_layer_set_namespace(GTK_WINDOW(menu_window), "bar");
-  gtk_layer_set_layer(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_LAYER_TOP);
-
-  // Disable keyboard interactivity so menu bar doesn't accept focus
-  gtk_layer_set_keyboard_mode(GTK_WINDOW(menu_window),
-                              GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-
-  // Anchor to top edge
-  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_LEFT,
-                       TRUE);
-  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_RIGHT,
-                       TRUE);
-
-  // Set margins for padding (transparent area)
-  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_TOP,
-                       BAR_PADDING_TOP);
-  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_LEFT,
-                       BAR_PADDING_HORIZONTAL);
-  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_RIGHT,
-                       BAR_PADDING_HORIZONTAL);
-
-  // Set exclusive zone to reserve space (height + top and bottom padding)
-  gtk_layer_set_exclusive_zone(GTK_WINDOW(menu_window), BAR_HEIGHT +
-                                                            BAR_PADDING_TOP +
-                                                            BAR_PADDING_BOTTOM);
-
-  // Make window background transparent
-  gtk_widget_add_css_class(GTK_WIDGET(menu_window), "transparent-window");
-
-  // Create outer container with padding (transparent - no background)
-  GtkWidget *outer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand(outer_box, TRUE);
-  gtk_widget_set_halign(outer_box, GTK_ALIGN_FILL);
-
-  // Create inner bar container (with background, border, etc.)
-  GtkWidget *bar_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-  gtk_widget_set_size_request(bar_box, -1, BAR_HEIGHT);
-  gtk_widget_set_vexpand(bar_box, FALSE);
-  gtk_widget_set_hexpand(bar_box, TRUE);
-  gtk_widget_set_halign(bar_box, GTK_ALIGN_FILL);
-  gtk_widget_set_valign(bar_box, GTK_ALIGN_CENTER);
-  gtk_widget_add_css_class(bar_box, "bar");
-
-  // Create CSS for the bar and transparent window
-  GtkCssProvider *css_provider = gtk_css_provider_new();
-
-  // Convert hex color to rgba for opacity support
+// Initialize CSS once (bar + day-text styles)
+static void init_css(void) {
+  // Bar CSS
+  GtkCssProvider *bar_provider = gtk_css_provider_new();
   guint bg_r, bg_g, bg_b;
   guint border_r, border_g, border_b;
   sscanf(BAR_BACKGROUND_COLOR, "#%02x%02x%02x", &bg_r, &bg_g, &bg_b);
   sscanf(BAR_BORDER_COLOR, "#%02x%02x%02x", &border_r, &border_g, &border_b);
 
-  gchar *css = g_strdup_printf(
+  gchar *bar_css = g_strdup_printf(
       ".transparent-window {"
       "  background-color: transparent;"
       "}"
@@ -823,176 +534,16 @@ static void create_menu_bar(GtkApplication *app) {
       border_g, border_b, BAR_BACKGROUND_OPACITY, BAR_BORDER_RADIUS, BAR_HEIGHT,
       BAR_FONT, BAR_TEXT_SIZE, BAR_FONT, BAR_TEXT_SIZE);
 
-  gtk_css_provider_load_from_string(css_provider, css);
+  gtk_css_provider_load_from_string(bar_provider, bar_css);
   gtk_style_context_add_provider_for_display(
-      gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider),
+      gdk_display_get_default(), GTK_STYLE_PROVIDER(bar_provider),
       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  g_free(css);
-  g_object_unref(css_provider);
+  g_free(bar_css);
+  g_object_unref(bar_provider);
 
-  // Allocate memory for item data
-  bar_items_data = g_malloc0(sizeof(BarItemData) * BAR_ITEMS_COUNT);
-
-  // Add content to bar from config
-  for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
-    const BarItem *item = &BAR_ITEMS[i];
-    BarItemData *item_data = &bar_items_data[i];
-    item_data->command = item->command;
-    item_data->interval = item->interval;
-
-    if (strcmp(item->command, "<separator>") == 0) {
-      // Create separator that expands
-      GtkWidget *separator = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-      gtk_widget_set_hexpand(separator, TRUE);
-      gtk_widget_set_halign(separator, GTK_ALIGN_FILL);
-      item_data->widget = separator;
-      gtk_box_append(GTK_BOX(bar_box), separator);
-    } else {
-      // Create label for command output
-      GtkWidget *label = gtk_label_new("");
-      gtk_widget_set_halign(label, GTK_ALIGN_START);
-      item_data->widget = label;
-      gtk_box_append(GTK_BOX(bar_box), label);
-
-      // Initialize thread-related fields
-      item_data->should_stop = FALSE;
-      item_data->thread_running = FALSE;
-      item_data->previous_output = NULL;
-      item_data->thread = NULL;
-      g_mutex_init(&item_data->mutex);
-      g_cond_init(&item_data->cond);
-
-      // Spawn worker thread for this module if interval > 0
-      // Ensure thread is only created once
-      if (item->interval > 0 && item_data->thread == NULL) {
-        GError *error = NULL;
-        item_data->thread = g_thread_try_new(
-            "module-worker", module_worker_thread, item_data, &error);
-
-        if (item_data->thread == NULL) {
-          g_printerr("Failed to create thread for module %zu: %s\n", i,
-                     error ? error->message : "Unknown error");
-          if (error)
-            g_error_free(error);
-        }
-      } else {
-        // No interval - execute once immediately
-        gchar *output = execute_command(item_data->command);
-        if (output != NULL) {
-          gtk_label_set_text(GTK_LABEL(label), output);
-          g_free(output);
-        }
-      }
-    }
-  }
-
-  gtk_box_append(GTK_BOX(outer_box), bar_box);
-  gtk_window_set_child(GTK_WINDOW(menu_window), outer_box);
-
-  gtk_widget_set_visible(menu_window, TRUE);
-}
-
-static void create_day_text(GtkApplication *app) {
-  // Create day text window
-  GtkWidget *day_window = gtk_application_window_new(app);
-  gtk_layer_init_for_window(GTK_WINDOW(day_window));
-  gtk_layer_set_namespace(GTK_WINDOW(day_window), "day-text");
-  gtk_layer_set_layer(GTK_WINDOW(day_window), GTK_LAYER_SHELL_LAYER_BACKGROUND);
-
-  // Disable keyboard interactivity so it stays behind other layer shell windows
-  gtk_layer_set_keyboard_mode(GTK_WINDOW(day_window),
-                              GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
-
-  // Anchor to all edges to cover the entire screen
-  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_BOTTOM,
-                       TRUE);
-  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
-  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_RIGHT,
-                       TRUE);
-
-  // Ensure no margins - should cover entire screen
-  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_TOP, 0);
-  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
-  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
-  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
-
-  // Set exclusive zone to -1 (above background which is -2)
-  gtk_layer_set_exclusive_zone(GTK_WINDOW(day_window), -1);
-
-  // Make window background transparent
-  gtk_widget_add_css_class(GTK_WIDGET(day_window), "transparent-day-window");
-
-  // Create vertical box to stack month+day and day name
-  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_set_halign(vbox, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign(vbox, GTK_ALIGN_CENTER);
-
-  // Create a centered container - both rows will be left-aligned within it
-  // This ensures their left edges align, while the container itself is centered
-  GtkWidget *align_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_set_halign(align_container, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign(align_container, GTK_ALIGN_CENTER);
-  gtk_widget_set_hexpand(align_container, FALSE);
-  gtk_widget_add_css_class(align_container, "date-align-container");
-
-  // Create horizontal box for month and day number
-  GtkWidget *month_day_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-  gtk_widget_set_halign(month_day_box, GTK_ALIGN_START);
-  gtk_widget_set_hexpand(month_day_box, FALSE);
-
-  // Create label for month name (initialize as empty, will be updated by
-  // thread)
-  GtkWidget *month_label = gtk_label_new("");
-  gtk_widget_set_halign(month_label, GTK_ALIGN_START);
-  gtk_widget_add_css_class(month_label, "month-text");
-
-  // Create label for day number (initialize as empty, will be updated by
-  // thread)
-  GtkWidget *day_number_label = gtk_label_new("");
-  gtk_widget_set_halign(day_number_label, GTK_ALIGN_START);
-  gtk_widget_add_css_class(day_number_label, "day-number-text");
-
-  // Append month and day number to horizontal box
-  gtk_box_append(GTK_BOX(month_day_box), month_label);
-  gtk_box_append(GTK_BOX(month_day_box), day_number_label);
-
-  // Create label for day name - text centered, but container left-aligned to
-  // match month+day (initialize as empty, will be updated by thread)
-  GtkWidget *day_label = gtk_label_new("");
-  gtk_label_set_xalign(GTK_LABEL(day_label), 0.5); // Center text within label
-  gtk_widget_set_halign(day_label, GTK_ALIGN_FILL);
-  gtk_widget_set_hexpand(day_label, TRUE);
-  gtk_widget_add_css_class(day_label, "day-text");
-
-  // Append month+day box and day label to align container (both left-aligned)
-  gtk_box_append(GTK_BOX(align_container), month_day_box);
-  gtk_box_append(GTK_BOX(align_container), day_label);
-
-  // Append align container to main vertical box
-  gtk_box_append(GTK_BOX(vbox), align_container);
-
-  // Create a container for weather that matches the width of align_container
-  GtkWidget *weather_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_halign(weather_container, GTK_ALIGN_END);
-  gtk_widget_set_hexpand(weather_container, TRUE);
-  gtk_widget_add_css_class(weather_container, "date-align-container");
-
-  // Create weather module (aligned to right edge of day text, below day text)
-  GtkWidget *weather_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-
-  // Add expanding spacer to push weather content to the right
-  GtkWidget *weather_spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand(weather_spacer, TRUE);
-  gtk_box_append(GTK_BOX(weather_box), weather_spacer);
-
-  // Add weather box to weather container
-  gtk_box_append(GTK_BOX(weather_container), weather_box);
-
-  // Create CSS for the day text, month text, and day number text
-  GtkCssProvider *css_provider = gtk_css_provider_new();
-
-  gchar *css = g_strdup_printf(
+  // Day-text + weather CSS
+  GtkCssProvider *day_provider = gtk_css_provider_new();
+  gchar *day_css = g_strdup_printf(
       ".transparent-day-window {"
       "  background-color: transparent;"
       "}"
@@ -1067,112 +618,37 @@ static void create_day_text(GtkApplication *app) {
       WEATHER_TEMP_MARGIN_RIGHT, WEATHER_TEMP_MARGIN_BOTTOM,
       WEATHER_TEMP_MARGIN_LEFT);
 
-  gtk_css_provider_load_from_string(css_provider, css);
+  gtk_css_provider_load_from_string(day_provider, day_css);
   gtk_style_context_add_provider_for_display(
-      gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider),
+      gdk_display_get_default(), GTK_STYLE_PROVIDER(day_provider),
       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  g_free(css);
-  g_object_unref(css_provider);
-
-  // Create label for weather emoji
-  GtkWidget *weather_emoji_label = gtk_label_new("");
-  gtk_widget_set_halign(weather_emoji_label, GTK_ALIGN_START);
-  gtk_widget_add_css_class(weather_emoji_label, "weather-emoji");
-
-  // Create label for weather temperature
-  GtkWidget *weather_temp_label = gtk_label_new("");
-  gtk_widget_set_halign(weather_temp_label, GTK_ALIGN_START);
-  gtk_widget_add_css_class(weather_temp_label, "weather-temp");
-
-  // Append emoji and temperature to weather box
-  gtk_box_append(GTK_BOX(weather_box), weather_emoji_label);
-  gtk_box_append(GTK_BOX(weather_box), weather_temp_label);
-
-  // Append weather container to main vertical box
-  gtk_box_append(GTK_BOX(vbox), weather_container);
-
-  // Initialize date data structure
-  date_data = g_malloc0(sizeof(DateData));
-  date_data->day_widget = day_label;
-  date_data->month_widget = month_label;
-  date_data->day_number_widget = day_number_label;
-  date_data->should_stop = FALSE;
-  date_data->thread_running = FALSE;
-  date_data->previous_day = NULL;
-  date_data->previous_month = NULL;
-  date_data->previous_day_number = NULL;
-  date_data->thread = NULL;
-  g_mutex_init(&date_data->mutex);
-  g_cond_init(&date_data->cond);
-
-  // Spawn date worker thread
-  GError *error = NULL;
-  date_data->thread =
-      g_thread_try_new("date-worker", date_worker_thread, date_data, &error);
-
-  if (date_data->thread == NULL) {
-    g_printerr("Failed to create date thread: %s\n",
-               error ? error->message : "Unknown error");
-    if (error)
-      g_error_free(error);
-  }
-
-  // Initialize weather data structure
-  weather_data = g_malloc0(sizeof(WeatherData));
-  weather_data->emoji_widget = weather_emoji_label;
-  weather_data->temp_widget = weather_temp_label;
-  weather_data->should_stop = FALSE;
-  weather_data->thread_running = FALSE;
-  weather_data->previous_emoji = NULL;
-  weather_data->previous_temp = NULL;
-  weather_data->thread = NULL;
-  g_mutex_init(&weather_data->mutex);
-  g_cond_init(&weather_data->cond);
-
-  // Spawn weather worker thread
-  error = NULL;
-  weather_data->thread = g_thread_try_new(
-      "weather-worker", weather_worker_thread, weather_data, &error);
-
-  if (weather_data->thread == NULL) {
-    g_printerr("Failed to create weather thread: %s\n",
-               error ? error->message : "Unknown error");
-    if (error)
-      g_error_free(error);
-  }
-
-  gtk_window_set_child(GTK_WINDOW(day_window), vbox);
-  gtk_widget_set_visible(day_window, TRUE);
+  g_free(day_css);
+  g_object_unref(day_provider);
 }
 
-static void activate(GtkApplication *app) {
-  // Create background window
+// Create background window pinned to a specific monitor
+static GtkWidget *create_background_window(GtkApplication *app,
+                                           GdkMonitor *monitor) {
   GtkWidget *window = gtk_application_window_new(app);
   gtk_layer_init_for_window(GTK_WINDOW(window));
   gtk_layer_set_namespace(GTK_WINDOW(window), "background");
   gtk_layer_set_layer(GTK_WINDOW(window), GTK_LAYER_SHELL_LAYER_BACKGROUND);
-
-  // Disable keyboard interactivity so it stays behind other layer shell windows
   gtk_layer_set_keyboard_mode(GTK_WINDOW(window),
                               GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+  gtk_layer_set_monitor(GTK_WINDOW(window), monitor);
 
-  // Anchor to all edges to cover the entire screen
   gtk_layer_set_anchor(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
   gtk_layer_set_anchor(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
   gtk_layer_set_anchor(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
   gtk_layer_set_anchor(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
 
-  // Ensure no margins - background should cover entire screen
   gtk_layer_set_margin(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_TOP, 0);
   gtk_layer_set_margin(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
   gtk_layer_set_margin(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
   gtk_layer_set_margin(GTK_WINDOW(window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
 
-  // Set exclusive zone to -2 to ensure background always covers full screen
-  // and doesn't respect exclusive zones from other windows
   gtk_layer_set_exclusive_zone(GTK_WINDOW(window), -2);
 
-  // Set background image if provided
   if (background_image_path != NULL) {
     GtkWidget *picture = gtk_picture_new_for_filename(background_image_path);
     if (picture != NULL) {
@@ -1184,16 +660,589 @@ static void activate(GtkApplication *app) {
   }
 
   gtk_widget_set_visible(window, TRUE);
+  return window;
+}
 
-  // Create day text window (on layer -1, above background)
-  create_day_text(app);
+// Create day-text window pinned to a specific monitor; fills md's label ptrs
+static GtkWidget *create_day_text_window(GtkApplication *app,
+                                         GdkMonitor *monitor,
+                                         MonitorData *md) {
+  GtkWidget *day_window = gtk_application_window_new(app);
+  gtk_layer_init_for_window(GTK_WINDOW(day_window));
+  gtk_layer_set_namespace(GTK_WINDOW(day_window), "day-text");
+  gtk_layer_set_layer(GTK_WINDOW(day_window), GTK_LAYER_SHELL_LAYER_BACKGROUND);
+  gtk_layer_set_keyboard_mode(GTK_WINDOW(day_window),
+                              GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+  gtk_layer_set_monitor(GTK_WINDOW(day_window), monitor);
 
-  // Create menu bar window
-  create_menu_bar(app);
+  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_BOTTOM,
+                       TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_LEFT,
+                       TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_RIGHT,
+                       TRUE);
+
+  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_TOP, 0);
+  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
+  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_LEFT, 0);
+  gtk_layer_set_margin(GTK_WINDOW(day_window), GTK_LAYER_SHELL_EDGE_RIGHT, 0);
+
+  gtk_layer_set_exclusive_zone(GTK_WINDOW(day_window), -1);
+  gtk_widget_add_css_class(GTK_WIDGET(day_window), "transparent-day-window");
+
+  // Layout
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_halign(vbox, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(vbox, GTK_ALIGN_CENTER);
+
+  GtkWidget *align_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_halign(align_container, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(align_container, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand(align_container, FALSE);
+  gtk_widget_add_css_class(align_container, "date-align-container");
+
+  GtkWidget *month_day_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_halign(month_day_box, GTK_ALIGN_START);
+  gtk_widget_set_hexpand(month_day_box, FALSE);
+
+  GtkWidget *month_label = gtk_label_new("");
+  gtk_widget_set_halign(month_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class(month_label, "month-text");
+
+  GtkWidget *day_number_label = gtk_label_new("");
+  gtk_widget_set_halign(day_number_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class(day_number_label, "day-number-text");
+
+  gtk_box_append(GTK_BOX(month_day_box), month_label);
+  gtk_box_append(GTK_BOX(month_day_box), day_number_label);
+
+  GtkWidget *day_label = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(day_label), 0.5);
+  gtk_widget_set_halign(day_label, GTK_ALIGN_FILL);
+  gtk_widget_set_hexpand(day_label, TRUE);
+  gtk_widget_add_css_class(day_label, "day-text");
+
+  gtk_box_append(GTK_BOX(align_container), month_day_box);
+  gtk_box_append(GTK_BOX(align_container), day_label);
+  gtk_box_append(GTK_BOX(vbox), align_container);
+
+  GtkWidget *weather_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_halign(weather_container, GTK_ALIGN_END);
+  gtk_widget_set_hexpand(weather_container, TRUE);
+  gtk_widget_add_css_class(weather_container, "date-align-container");
+
+  GtkWidget *weather_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+
+  GtkWidget *weather_spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(weather_spacer, TRUE);
+  gtk_box_append(GTK_BOX(weather_box), weather_spacer);
+
+  gtk_box_append(GTK_BOX(weather_container), weather_box);
+
+  GtkWidget *weather_emoji_label = gtk_label_new("");
+  gtk_widget_set_halign(weather_emoji_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class(weather_emoji_label, "weather-emoji");
+
+  GtkWidget *weather_temp_label = gtk_label_new("");
+  gtk_widget_set_halign(weather_temp_label, GTK_ALIGN_START);
+  gtk_widget_add_css_class(weather_temp_label, "weather-temp");
+
+  gtk_box_append(GTK_BOX(weather_box), weather_emoji_label);
+  gtk_box_append(GTK_BOX(weather_box), weather_temp_label);
+  gtk_box_append(GTK_BOX(vbox), weather_container);
+
+  // Store label pointers in MonitorData
+  md->day_label = day_label;
+  md->month_label = month_label;
+  md->day_number_label = day_number_label;
+  md->weather_emoji_label = weather_emoji_label;
+  md->weather_temp_label = weather_temp_label;
+
+  gtk_window_set_child(GTK_WINDOW(day_window), vbox);
+  gtk_widget_set_visible(day_window, TRUE);
+  return day_window;
+}
+
+// Create bar window pinned to a specific monitor; fills md->bar_item_widgets
+static GtkWidget *create_bar_window(GtkApplication *app, GdkMonitor *monitor,
+                                    MonitorData *md) {
+  GtkWidget *menu_window = gtk_application_window_new(app);
+  gtk_layer_init_for_window(GTK_WINDOW(menu_window));
+  gtk_layer_set_namespace(GTK_WINDOW(menu_window), "bar");
+  gtk_layer_set_layer(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_LAYER_TOP);
+  gtk_layer_set_keyboard_mode(GTK_WINDOW(menu_window),
+                              GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+  gtk_layer_set_monitor(GTK_WINDOW(menu_window), monitor);
+
+  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_TOP,
+                       TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_LEFT,
+                       TRUE);
+  gtk_layer_set_anchor(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_RIGHT,
+                       TRUE);
+
+  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_TOP,
+                       BAR_PADDING_TOP);
+  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_LEFT,
+                       BAR_PADDING_HORIZONTAL);
+  gtk_layer_set_margin(GTK_WINDOW(menu_window), GTK_LAYER_SHELL_EDGE_RIGHT,
+                       BAR_PADDING_HORIZONTAL);
+
+  gtk_layer_set_exclusive_zone(GTK_WINDOW(menu_window),
+                               BAR_HEIGHT + BAR_PADDING_TOP + BAR_PADDING_BOTTOM);
+  gtk_widget_add_css_class(GTK_WIDGET(menu_window), "transparent-window");
+
+  GtkWidget *outer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(outer_box, TRUE);
+  gtk_widget_set_halign(outer_box, GTK_ALIGN_FILL);
+
+  GtkWidget *bar_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_size_request(bar_box, -1, BAR_HEIGHT);
+  gtk_widget_set_vexpand(bar_box, FALSE);
+  gtk_widget_set_hexpand(bar_box, TRUE);
+  gtk_widget_set_halign(bar_box, GTK_ALIGN_FILL);
+  gtk_widget_set_valign(bar_box, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class(bar_box, "bar");
+
+  // Add bar items; store label widgets in md->bar_item_widgets
+  for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
+    const BarItem *item = &BAR_ITEMS[i];
+
+    if (strcmp(item->command, "<separator>") == 0) {
+      GtkWidget *separator = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+      gtk_widget_set_hexpand(separator, TRUE);
+      gtk_widget_set_halign(separator, GTK_ALIGN_FILL);
+      gtk_box_append(GTK_BOX(bar_box), separator);
+      // md->bar_item_widgets[i] stays NULL (g_malloc0'd)
+    } else {
+      GtkWidget *label = gtk_label_new("");
+      gtk_widget_set_halign(label, GTK_ALIGN_START);
+      md->bar_item_widgets[i] = label;
+      gtk_box_append(GTK_BOX(bar_box), label);
+    }
+  }
+
+  gtk_box_append(GTK_BOX(outer_box), bar_box);
+  gtk_window_set_child(GTK_WINDOW(menu_window), outer_box);
+  gtk_widget_set_visible(menu_window, TRUE);
+  return menu_window;
+}
+
+// Seed a newly-created monitor's labels with current worker thread state
+static void seed_monitor_labels(MonitorData *md) {
+  // Bar item labels
+  if (bar_items_data != NULL && md->bar_item_widgets != NULL) {
+    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
+      BarItemData *item_data = &bar_items_data[i];
+      if (item_data->command == NULL ||
+          strcmp(item_data->command, "<separator>") == 0)
+        continue;
+      if (md->bar_item_widgets[i] == NULL)
+        continue;
+      g_mutex_lock(&item_data->mutex);
+      gchar *prev = item_data->previous_output
+                        ? g_strdup(item_data->previous_output)
+                        : NULL;
+      g_mutex_unlock(&item_data->mutex);
+      if (prev != NULL) {
+        gtk_label_set_text(GTK_LABEL(md->bar_item_widgets[i]), prev);
+        g_free(prev);
+      }
+    }
+  }
+
+  // Weather labels
+  if (weather_data != NULL) {
+    g_mutex_lock(&weather_data->mutex);
+    gchar *emoji = weather_data->previous_emoji
+                       ? g_strdup(weather_data->previous_emoji)
+                       : NULL;
+    gchar *temp = weather_data->previous_temp
+                      ? g_strdup(weather_data->previous_temp)
+                      : NULL;
+    g_mutex_unlock(&weather_data->mutex);
+    if (emoji != NULL && md->weather_emoji_label != NULL)
+      gtk_label_set_text(GTK_LABEL(md->weather_emoji_label), emoji);
+    if (temp != NULL && md->weather_temp_label != NULL)
+      gtk_label_set_text(GTK_LABEL(md->weather_temp_label), temp);
+    g_free(emoji);
+    g_free(temp);
+  }
+
+  // Date labels
+  if (date_data != NULL) {
+    g_mutex_lock(&date_data->mutex);
+    gchar *day =
+        date_data->previous_day ? g_strdup(date_data->previous_day) : NULL;
+    gchar *month =
+        date_data->previous_month ? g_strdup(date_data->previous_month) : NULL;
+    gchar *day_num = date_data->previous_day_number
+                         ? g_strdup(date_data->previous_day_number)
+                         : NULL;
+    g_mutex_unlock(&date_data->mutex);
+    if (day != NULL && md->day_label != NULL)
+      gtk_label_set_text(GTK_LABEL(md->day_label), day);
+    if (month != NULL && md->month_label != NULL)
+      gtk_label_set_text(GTK_LABEL(md->month_label), month);
+    if (day_num != NULL && md->day_number_label != NULL)
+      gtk_label_set_text(GTK_LABEL(md->day_number_label), day_num);
+    g_free(day);
+    g_free(month);
+    g_free(day_num);
+  }
+}
+
+// Null widget ptrs, destroy windows, remove from g_monitors, free md
+static void teardown_monitor(MonitorData *md) {
+  // Phase 1: NULL all widget pointers under mutex (crash guard for idle callbacks)
+  g_mutex_lock(&g_monitors_mutex);
+  md->day_label = NULL;
+  md->month_label = NULL;
+  md->day_number_label = NULL;
+  md->weather_emoji_label = NULL;
+  md->weather_temp_label = NULL;
+  if (md->bar_item_widgets != NULL) {
+    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++)
+      md->bar_item_widgets[i] = NULL;
+  }
+  g_mutex_unlock(&g_monitors_mutex);
+
+  // Phase 2: Destroy windows
+  if (md->bar_window != NULL) {
+    gtk_window_destroy(GTK_WINDOW(md->bar_window));
+    md->bar_window = NULL;
+  }
+  if (md->day_window != NULL) {
+    gtk_window_destroy(GTK_WINDOW(md->day_window));
+    md->day_window = NULL;
+  }
+  if (md->bg_window != NULL) {
+    gtk_window_destroy(GTK_WINDOW(md->bg_window));
+    md->bg_window = NULL;
+  }
+
+  // Phase 3: Remove from list and free
+  g_mutex_lock(&g_monitors_mutex);
+  g_monitors = g_list_remove(g_monitors, md);
+  g_mutex_unlock(&g_monitors_mutex);
+
+  g_free(md->bar_item_widgets);
+  g_free(md);
+}
+
+// Create all three windows for a monitor and register it in g_monitors
+static MonitorData *setup_monitor(GtkApplication *app, GdkMonitor *monitor) {
+  MonitorData *md = g_malloc0(sizeof(MonitorData));
+  md->monitor = monitor;
+  md->bar_item_widgets = g_malloc0(sizeof(GtkWidget *) * BAR_ITEMS_COUNT);
+
+  md->bg_window = create_background_window(app, monitor);
+  md->day_window = create_day_text_window(app, monitor, md);
+  md->bar_window = create_bar_window(app, monitor, md);
+
+  seed_monitor_labels(md);
+
+  g_mutex_lock(&g_monitors_mutex);
+  g_monitors = g_list_append(g_monitors, md);
+  g_mutex_unlock(&g_monitors_mutex);
+
+  return md;
+}
+
+// Reconcile g_monitors against current GListModel on hotplug events
+static void on_monitors_changed(GListModel *model, guint position,
+                                guint removed, guint added,
+                                gpointer user_data) {
+  (void)position;
+  (void)removed;
+  (void)added;
+
+  GtkApplication *app = GTK_APPLICATION(user_data);
+  guint n = g_list_model_get_n_items(model);
+
+  // Find tracked monitors no longer in the model
+  GList *to_remove = NULL;
+  g_mutex_lock(&g_monitors_mutex);
+  for (GList *l = g_monitors; l; l = l->next) {
+    MonitorData *md = l->data;
+    gboolean found = FALSE;
+    for (guint i = 0; i < n; i++) {
+      GdkMonitor *m = GDK_MONITOR(g_list_model_get_item(model, i));
+      if (m == md->monitor) {
+        found = TRUE;
+        g_object_unref(m);
+        break;
+      }
+      g_object_unref(m);
+    }
+    if (!found)
+      to_remove = g_list_append(to_remove, md);
+  }
+  g_mutex_unlock(&g_monitors_mutex);
+
+  for (GList *l = to_remove; l; l = l->next)
+    teardown_monitor((MonitorData *)l->data);
+  g_list_free(to_remove);
+
+  // Find monitors in the model not yet tracked
+  for (guint i = 0; i < n; i++) {
+    GdkMonitor *m = GDK_MONITOR(g_list_model_get_item(model, i));
+    gboolean found = FALSE;
+    g_mutex_lock(&g_monitors_mutex);
+    for (GList *l = g_monitors; l; l = l->next) {
+      if (((MonitorData *)l->data)->monitor == m) {
+        found = TRUE;
+        break;
+      }
+    }
+    g_mutex_unlock(&g_monitors_mutex);
+    if (!found)
+      setup_monitor(app, m);
+    g_object_unref(m);
+  }
+}
+
+// Allocate bar_items_data and start one worker thread per non-separator item
+static void init_bar_workers(void) {
+  bar_items_data = g_malloc0(sizeof(BarItemData) * BAR_ITEMS_COUNT);
+
+  for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
+    const BarItem *item = &BAR_ITEMS[i];
+    BarItemData *item_data = &bar_items_data[i];
+    item_data->command = item->command;
+    item_data->interval = item->interval;
+    item_data->item_index = (int)i;
+
+    if (strcmp(item->command, "<separator>") == 0)
+      continue;
+
+    item_data->should_stop = FALSE;
+    item_data->thread_running = FALSE;
+    item_data->previous_output = NULL;
+    item_data->thread = NULL;
+    g_mutex_init(&item_data->mutex);
+    g_cond_init(&item_data->cond);
+
+    if (item->interval > 0) {
+      GError *error = NULL;
+      item_data->thread = g_thread_try_new(
+          "module-worker", module_worker_thread, item_data, &error);
+      if (item_data->thread == NULL) {
+        g_printerr("Failed to create thread for module %zu: %s\n", i,
+                   error ? error->message : "Unknown error");
+        if (error)
+          g_error_free(error);
+      }
+    }
+  }
+}
+
+// Allocate date_data and start the date worker thread
+static void init_date_worker(void) {
+  date_data = g_malloc0(sizeof(DateData));
+  date_data->should_stop = FALSE;
+  date_data->thread_running = FALSE;
+  date_data->previous_day = NULL;
+  date_data->previous_month = NULL;
+  date_data->previous_day_number = NULL;
+  date_data->thread = NULL;
+  g_mutex_init(&date_data->mutex);
+  g_cond_init(&date_data->cond);
+
+  GError *error = NULL;
+  date_data->thread =
+      g_thread_try_new("date-worker", date_worker_thread, date_data, &error);
+  if (date_data->thread == NULL) {
+    g_printerr("Failed to create date thread: %s\n",
+               error ? error->message : "Unknown error");
+    if (error)
+      g_error_free(error);
+  }
+}
+
+// Allocate weather_data and start the weather worker thread
+static void init_weather_worker(void) {
+  weather_data = g_malloc0(sizeof(WeatherData));
+  weather_data->should_stop = FALSE;
+  weather_data->thread_running = FALSE;
+  weather_data->previous_emoji = NULL;
+  weather_data->previous_temp = NULL;
+  weather_data->thread = NULL;
+  g_mutex_init(&weather_data->mutex);
+  g_cond_init(&weather_data->cond);
+
+  GError *error = NULL;
+  weather_data->thread = g_thread_try_new(
+      "weather-worker", weather_worker_thread, weather_data, &error);
+  if (weather_data->thread == NULL) {
+    g_printerr("Failed to create weather thread: %s\n",
+               error ? error->message : "Unknown error");
+    if (error)
+      g_error_free(error);
+  }
+}
+
+// Cleanup: Phase 1 stop/join all threads; Phase 2 teardown all monitors
+static void cleanup_resources(void) {
+  // Phase 1: Stop and join bar worker threads
+  if (bar_items_data != NULL) {
+    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
+      BarItemData *item_data = &bar_items_data[i];
+
+      g_mutex_lock(&item_data->mutex);
+      GThread *thread = item_data->thread;
+      if (thread != NULL) {
+        item_data->should_stop = TRUE;
+        g_cond_signal(&item_data->cond);
+        item_data->thread = NULL;
+      }
+      g_mutex_unlock(&item_data->mutex);
+
+      if (thread != NULL) {
+        gint timeout = 50;
+        while (timeout > 0) {
+          g_mutex_lock(&item_data->mutex);
+          gboolean running = item_data->thread_running;
+          g_mutex_unlock(&item_data->mutex);
+          if (!running)
+            break;
+          g_usleep(100000);
+          timeout--;
+        }
+        g_thread_join(thread);
+      }
+
+      if (item_data->command != NULL &&
+          strcmp(item_data->command, "<separator>") != 0) {
+        g_cond_clear(&item_data->cond);
+        g_mutex_clear(&item_data->mutex);
+        if (item_data->previous_output != NULL) {
+          g_free(item_data->previous_output);
+          item_data->previous_output = NULL;
+        }
+      }
+    }
+    g_free(bar_items_data);
+    bar_items_data = NULL;
+  }
+
+  // Stop and join weather thread
+  if (weather_data != NULL) {
+    g_mutex_lock(&weather_data->mutex);
+    GThread *thread = weather_data->thread;
+    if (thread != NULL) {
+      weather_data->should_stop = TRUE;
+      g_cond_signal(&weather_data->cond);
+      weather_data->thread = NULL;
+    }
+    g_mutex_unlock(&weather_data->mutex);
+
+    if (thread != NULL) {
+      gint timeout = 50;
+      while (timeout > 0) {
+        g_mutex_lock(&weather_data->mutex);
+        gboolean running = weather_data->thread_running;
+        g_mutex_unlock(&weather_data->mutex);
+        if (!running)
+          break;
+        g_usleep(100000);
+        timeout--;
+      }
+      g_thread_join(thread);
+    }
+
+    g_cond_clear(&weather_data->cond);
+    g_mutex_clear(&weather_data->mutex);
+    if (weather_data->previous_emoji != NULL) {
+      g_free(weather_data->previous_emoji);
+      weather_data->previous_emoji = NULL;
+    }
+    if (weather_data->previous_temp != NULL) {
+      g_free(weather_data->previous_temp);
+      weather_data->previous_temp = NULL;
+    }
+    g_free(weather_data);
+    weather_data = NULL;
+  }
+
+  // Stop and join date thread
+  if (date_data != NULL) {
+    g_mutex_lock(&date_data->mutex);
+    GThread *thread = date_data->thread;
+    if (thread != NULL) {
+      date_data->should_stop = TRUE;
+      g_cond_signal(&date_data->cond);
+      date_data->thread = NULL;
+    }
+    g_mutex_unlock(&date_data->mutex);
+
+    if (thread != NULL) {
+      gint timeout = 50;
+      while (timeout > 0) {
+        g_mutex_lock(&date_data->mutex);
+        gboolean running = date_data->thread_running;
+        g_mutex_unlock(&date_data->mutex);
+        if (!running)
+          break;
+        g_usleep(100000);
+        timeout--;
+      }
+      g_thread_join(thread);
+    }
+
+    g_cond_clear(&date_data->cond);
+    g_mutex_clear(&date_data->mutex);
+    if (date_data->previous_day != NULL) {
+      g_free(date_data->previous_day);
+      date_data->previous_day = NULL;
+    }
+    if (date_data->previous_month != NULL) {
+      g_free(date_data->previous_month);
+      date_data->previous_month = NULL;
+    }
+    if (date_data->previous_day_number != NULL) {
+      g_free(date_data->previous_day_number);
+      date_data->previous_day_number = NULL;
+    }
+    g_free(date_data);
+    date_data = NULL;
+  }
+
+  // Phase 2: Teardown all monitors (threads fully stopped, no idle callbacks
+  // in flight)
+  while (g_monitors != NULL)
+    teardown_monitor((MonitorData *)g_monitors->data);
+
+  if (g_monitors_mutex_initialized) {
+    g_mutex_clear(&g_monitors_mutex);
+    g_monitors_mutex_initialized = FALSE;
+  }
+}
+
+static void activate(GtkApplication *app) {
+  g_mutex_init(&g_monitors_mutex);
+  g_monitors_mutex_initialized = TRUE;
+
+  init_css();
+  init_bar_workers();
+  init_date_worker();
+  init_weather_worker();
+
+  GdkDisplay *display = gdk_display_get_default();
+  GListModel *mon_list = gdk_display_get_monitors(display);
+  g_signal_connect(mon_list, "items-changed",
+                   G_CALLBACK(on_monitors_changed), app);
+
+  guint n = g_list_model_get_n_items(mon_list);
+  for (guint i = 0; i < n; i++) {
+    GdkMonitor *m = GDK_MONITOR(g_list_model_get_item(mon_list, i));
+    setup_monitor(app, m);
+    g_object_unref(m);
+  }
 }
 
 int main(int argc, char **argv) {
-  // Parse command line arguments
   GOptionContext *context;
   GOptionEntry entries[] = {{"background-image", 'b', 0, G_OPTION_ARG_STRING,
                              &background_image_path, "Path to background image",
@@ -1216,13 +1265,11 @@ int main(int argc, char **argv) {
   GtkApplication *app = gtk_application_new("org.example.layer-shell",
                                             G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
-
-  // Connect shutdown signal to ensure cleanup on application termination
   g_signal_connect(app, "shutdown", G_CALLBACK(cleanup_resources), NULL);
 
   int status = g_application_run(G_APPLICATION(app), argc, argv);
 
-  // Cleanup allocated resources (in case shutdown signal didn't fire)
+  // Cleanup in case shutdown signal didn't fire
   cleanup_resources();
   g_free(background_image_path);
   g_object_unref(app);
