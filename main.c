@@ -7,10 +7,14 @@
 #include <time.h>
 #include <unistd.h>
 
+// Forward declaration for MonitorData (needed by UpdateData and BarItemData)
+typedef struct _MonitorData MonitorData;
+
 // Structure to hold bar item update data for main thread
 typedef struct {
   int item_index;
   gchar *new_output;
+  MonitorData *owner_monitor; // NULL → update all monitors; non-NULL → specific monitor only
 } UpdateData;
 
 // Structure to hold weather update data for main thread
@@ -29,7 +33,7 @@ typedef struct {
 // Structure to hold bar item worker state (identified by index, no widget ptr)
 typedef struct {
   int item_index;
-  const char *command;
+  gchar *command;           // owned (g_strdup'd)
   int interval;
   GThread *thread;
   gboolean should_stop;
@@ -37,10 +41,10 @@ typedef struct {
   GMutex mutex;
   GCond cond;
   gchar *previous_output;
+  MonitorData *owner_monitor; // non-NULL → UpdateData targets only this monitor
 } BarItemData;
 
 static gchar *background_image_path = NULL;
-static BarItemData *bar_items_data = NULL;
 
 // Structure to hold weather worker state
 typedef struct {
@@ -69,8 +73,8 @@ typedef struct {
 
 static DateData *date_data = NULL;
 
-// Per-monitor widget state
-typedef struct {
+// Per-monitor widget state (forward declared at top for mutual references)
+struct _MonitorData {
   GdkMonitor *monitor;
   GtkWidget  *bg_window;
   GtkWidget  *day_window;
@@ -78,7 +82,8 @@ typedef struct {
   GtkWidget  *day_label, *month_label, *day_number_label;
   GtkWidget  *weather_emoji_label, *weather_temp_label;
   GtkWidget **bar_item_widgets; // g_malloc0'd, length BAR_ITEMS_COUNT
-} MonitorData;
+  BarItemData *bar_items_data;  // allocated per-monitor, length BAR_ITEMS_COUNT
+};
 
 static GList   *g_monitors = NULL;
 static GMutex   g_monitors_mutex;
@@ -112,17 +117,23 @@ static gchar *execute_command(const char *command) {
   return output;
 }
 
-// Idle callback: update bar item label on all monitors
+// Idle callback: update bar item label on one or all monitors
 static gboolean update_ui_from_main_thread(gpointer user_data) {
   UpdateData *ud = (UpdateData *)user_data;
 
   g_mutex_lock(&g_monitors_mutex);
-  for (GList *l = g_monitors; l; l = l->next) {
-    MonitorData *md = l->data;
-    if (md->bar_item_widgets != NULL &&
-        md->bar_item_widgets[ud->item_index] != NULL) {
-      gtk_label_set_text(GTK_LABEL(md->bar_item_widgets[ud->item_index]),
-                         ud->new_output);
+  if (ud->owner_monitor != NULL) {
+    MonitorData *md = ud->owner_monitor;
+    if (md->bar_item_widgets && md->bar_item_widgets[ud->item_index])
+      gtk_label_set_text(GTK_LABEL(md->bar_item_widgets[ud->item_index]), ud->new_output);
+  } else {
+    for (GList *l = g_monitors; l; l = l->next) {
+      MonitorData *md = l->data;
+      if (md->bar_item_widgets != NULL &&
+          md->bar_item_widgets[ud->item_index] != NULL) {
+        gtk_label_set_text(GTK_LABEL(md->bar_item_widgets[ud->item_index]),
+                           ud->new_output);
+      }
     }
   }
   g_mutex_unlock(&g_monitors_mutex);
@@ -197,6 +208,7 @@ static gpointer module_worker_thread(gpointer user_data) {
   UpdateData *update_data = g_malloc(sizeof(UpdateData));
   update_data->item_index = item_data->item_index;
   update_data->new_output = output ? g_strdup(output) : g_strdup("");
+  update_data->owner_monitor = item_data->owner_monitor;
   g_idle_add(update_ui_from_main_thread, update_data);
 
   if (output != NULL)
@@ -244,6 +256,7 @@ static gpointer module_worker_thread(gpointer user_data) {
       UpdateData *ud = g_malloc(sizeof(UpdateData));
       ud->item_index = item_data->item_index;
       ud->new_output = output ? g_strdup(output) : g_strdup("");
+      ud->owner_monitor = item_data->owner_monitor;
 
       g_free(item_data->previous_output);
       item_data->previous_output = output ? g_strdup(output) : g_strdup("");
@@ -832,9 +845,9 @@ static GtkWidget *create_bar_window(GtkApplication *app, GdkMonitor *monitor,
 // Seed a newly-created monitor's labels with current worker thread state
 static void seed_monitor_labels(MonitorData *md) {
   // Bar item labels
-  if (bar_items_data != NULL && md->bar_item_widgets != NULL) {
+  if (md->bar_items_data != NULL && md->bar_item_widgets != NULL) {
     for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
-      BarItemData *item_data = &bar_items_data[i];
+      BarItemData *item_data = &md->bar_items_data[i];
       if (item_data->command == NULL ||
           strcmp(item_data->command, "<separator>") == 0)
         continue;
@@ -893,6 +906,43 @@ static void seed_monitor_labels(MonitorData *md) {
   }
 }
 
+// Stop and join bar worker threads for a single monitor, free bar_items_data
+static void stop_bar_workers(MonitorData *md) {
+  if (md->bar_items_data == NULL) return;
+  for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
+    BarItemData *item_data = &md->bar_items_data[i];
+    g_mutex_lock(&item_data->mutex);
+    GThread *thread = item_data->thread;
+    if (thread) {
+      item_data->should_stop = TRUE;
+      g_cond_signal(&item_data->cond);
+      item_data->thread = NULL;
+    }
+    g_mutex_unlock(&item_data->mutex);
+    if (thread) {
+      gint timeout = 50;
+      while (timeout-- > 0) {
+        g_mutex_lock(&item_data->mutex);
+        gboolean running = item_data->thread_running;
+        g_mutex_unlock(&item_data->mutex);
+        if (!running) break;
+        g_usleep(100000);
+      }
+      g_thread_join(thread);
+    }
+    if (item_data->command && strcmp(item_data->command, "<separator>") != 0) {
+      g_cond_clear(&item_data->cond);
+      g_mutex_clear(&item_data->mutex);
+      g_free(item_data->previous_output);
+      item_data->previous_output = NULL;
+    }
+    g_free(item_data->command);
+    item_data->command = NULL;
+  }
+  g_free(md->bar_items_data);
+  md->bar_items_data = NULL;
+}
+
 // Null widget ptrs, destroy windows, remove from g_monitors, free md
 static void teardown_monitor(MonitorData *md) {
   // Phase 1: NULL all widget pointers under mutex (crash guard for idle callbacks)
@@ -927,9 +977,13 @@ static void teardown_monitor(MonitorData *md) {
   g_monitors = g_list_remove(g_monitors, md);
   g_mutex_unlock(&g_monitors_mutex);
 
+  stop_bar_workers(md); // safe to call even if already stopped (NULL-check inside)
   g_free(md->bar_item_widgets);
   g_free(md);
 }
+
+// Forward declaration (defined after setup_monitor)
+static void init_bar_workers(MonitorData *md, const gchar *connector);
 
 // Create all three windows for a monitor and register it in g_monitors
 static MonitorData *setup_monitor(GtkApplication *app, GdkMonitor *monitor) {
@@ -937,11 +991,15 @@ static MonitorData *setup_monitor(GtkApplication *app, GdkMonitor *monitor) {
   md->monitor = monitor;
   md->bar_item_widgets = g_malloc0(sizeof(GtkWidget *) * BAR_ITEMS_COUNT);
 
+  const gchar *connector = gdk_monitor_get_connector(monitor);
+
   md->bg_window = create_background_window(app, monitor);
   md->day_window = create_day_text_window(app, monitor, md);
   md->bar_window = create_bar_window(app, monitor, md);
 
   seed_monitor_labels(md);
+
+  init_bar_workers(md, connector);
 
   g_mutex_lock(&g_monitors_mutex);
   g_monitors = g_list_append(g_monitors, md);
@@ -1003,16 +1061,21 @@ static void on_monitors_changed(GListModel *model, guint position,
   }
 }
 
-// Allocate bar_items_data and start one worker thread per non-separator item
-static void init_bar_workers(void) {
-  bar_items_data = g_malloc0(sizeof(BarItemData) * BAR_ITEMS_COUNT);
+// Allocate per-monitor bar_items_data and start one worker thread per non-separator item
+static void init_bar_workers(MonitorData *md, const gchar *connector) {
+  md->bar_items_data = g_malloc0(sizeof(BarItemData) * BAR_ITEMS_COUNT);
 
   for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
     const BarItem *item = &BAR_ITEMS[i];
-    BarItemData *item_data = &bar_items_data[i];
-    item_data->command = item->command;
-    item_data->interval = item->interval;
+    BarItemData *item_data = &md->bar_items_data[i];
     item_data->item_index = (int)i;
+    item_data->interval = item->interval;
+    item_data->owner_monitor = item->pass_monitor_name ? md : NULL;
+
+    if (item->pass_monitor_name && connector)
+      item_data->command = g_strdup_printf("%s %s", item->command, connector);
+    else
+      item_data->command = g_strdup(item->command);
 
     if (strcmp(item->command, "<separator>") == 0)
       continue;
@@ -1028,11 +1091,10 @@ static void init_bar_workers(void) {
       GError *error = NULL;
       item_data->thread = g_thread_try_new(
           "module-worker", module_worker_thread, item_data, &error);
-      if (item_data->thread == NULL) {
+      if (!item_data->thread) {
         g_printerr("Failed to create thread for module %zu: %s\n", i,
                    error ? error->message : "Unknown error");
-        if (error)
-          g_error_free(error);
+        if (error) g_error_free(error);
       }
     }
   }
@@ -1085,47 +1147,13 @@ static void init_weather_worker(void) {
 
 // Cleanup: Phase 1 stop/join all threads; Phase 2 teardown all monitors
 static void cleanup_resources(void) {
-  // Phase 1: Stop and join bar worker threads
-  if (bar_items_data != NULL) {
-    for (size_t i = 0; i < BAR_ITEMS_COUNT; i++) {
-      BarItemData *item_data = &bar_items_data[i];
-
-      g_mutex_lock(&item_data->mutex);
-      GThread *thread = item_data->thread;
-      if (thread != NULL) {
-        item_data->should_stop = TRUE;
-        g_cond_signal(&item_data->cond);
-        item_data->thread = NULL;
-      }
-      g_mutex_unlock(&item_data->mutex);
-
-      if (thread != NULL) {
-        gint timeout = 50;
-        while (timeout > 0) {
-          g_mutex_lock(&item_data->mutex);
-          gboolean running = item_data->thread_running;
-          g_mutex_unlock(&item_data->mutex);
-          if (!running)
-            break;
-          g_usleep(100000);
-          timeout--;
-        }
-        g_thread_join(thread);
-      }
-
-      if (item_data->command != NULL &&
-          strcmp(item_data->command, "<separator>") != 0) {
-        g_cond_clear(&item_data->cond);
-        g_mutex_clear(&item_data->mutex);
-        if (item_data->previous_output != NULL) {
-          g_free(item_data->previous_output);
-          item_data->previous_output = NULL;
-        }
-      }
-    }
-    g_free(bar_items_data);
-    bar_items_data = NULL;
-  }
+  // Phase 1: Stop bar workers on all monitors
+  g_mutex_lock(&g_monitors_mutex);
+  GList *monitors_snapshot = g_list_copy(g_monitors);
+  g_mutex_unlock(&g_monitors_mutex);
+  for (GList *l = monitors_snapshot; l; l = l->next)
+    stop_bar_workers((MonitorData *)l->data);
+  g_list_free(monitors_snapshot);
 
   // Stop and join weather thread
   if (weather_data != NULL) {
@@ -1225,7 +1253,6 @@ static void activate(GtkApplication *app) {
   g_monitors_mutex_initialized = TRUE;
 
   init_css();
-  init_bar_workers();
   init_date_worker();
   init_weather_worker();
 

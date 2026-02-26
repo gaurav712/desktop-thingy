@@ -65,15 +65,16 @@
 
 // Bar items configuration
 typedef struct {
-  const char *command; // Shell command to execute, or "<separator>" for spacer
-  int interval;        // Update interval in milliseconds (0 for separator)
+  const char *command;    // Shell command to execute, or "<separator>" for spacer
+  int interval;           // Update interval in milliseconds (0 for separator)
+  int pass_monitor_name;  // if 1, append connector name to command
 } BarItem;
 
 // Define the items array
-static const BarItem BAR_ITEMS[] = {{"mango-tags", 300},
-                                    {"mango-window-title", 300},
-                                    {"<separator>", 0},
-                                    {"status", 500}};
+static const BarItem BAR_ITEMS[] = {{"mango-tags",         300, 1},
+                                    {"mango-window-title", 300, 1},
+                                    {"<separator>",          0, 0},
+                                    {"status",             500, 0}};
 
 #define BAR_ITEMS_COUNT (sizeof(BAR_ITEMS) / sizeof(BAR_ITEMS[0]))
 
