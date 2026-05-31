@@ -1,3 +1,5 @@
+> **Note:** This project is moved to Codeberg: https://codeberg.org/gaurav712/desktop-thingy
+
 # desktop-thingy
 
 ![Sample](sample.png)
@@ -54,4 +56,3 @@ desktop-thingy
 ## License
 
 [MIT](LICENSE) or see the repository for licensing details.
-
